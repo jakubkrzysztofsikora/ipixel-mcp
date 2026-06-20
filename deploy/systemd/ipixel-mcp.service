@@ -1,0 +1,112 @@
+[Unit]
+Description=ipixel-mcp origin (MCP server driving the iPixel Color BLE matrix)
+Documentation=https://github.com/jksikora/ipixel-mcp
+# The origin binds LOOPBACK by design (review C-6). It does NOT depend on
+# tailscaled or cloudflared to start: those provide *reachability*, not the
+# bind. So we deliberately do NOT order after tailscaled here -- that would
+# crash-loop the origin if the tailnet is slow to come up. cloudflared and
+# tailscaled have their own units and start independently; cloudflared forwards
+# to 127.0.0.1:8765 once this is up.
+#
+# We DO want the network stack and the local BlueZ daemon present, because the
+# BLE supervisor needs an HCI adapter. network-online is "soft" (Wants) so a
+# transient network problem doesn't block the loopback server from starting.
+Wants=network-online.target
+After=network-online.target
+Wants=bluetooth.service
+After=bluetooth.service
+# Escalating backoff: >5 restarts within 60s -> unit enters failed state and
+# stops retrying (operator must investigate). These rate-limit keys live in
+# [Unit], not [Service]. Tune StartLimitIntervalSec up for infinite slow retries.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# --- Identity: non-root, in the bluetooth group so BlueZ D-Bus is reachable ---
+# Create with:  sudo useradd --system --no-create-home --shell /usr/sbin/nologin ipixel
+#               sudo usermod -aG bluetooth ipixel
+User=ipixel
+Group=ipixel
+SupplementaryGroups=bluetooth
+
+# --- Secrets / config (perms 0600, owned by the ipixel user) -----------------
+# Contains IPIXEL_ADDRESS, IPIXEL_STATIC_TOKEN, and optionally IPIXEL_HOST/PORT.
+# See deploy/secrets.md.
+EnvironmentFile=/etc/ipixel-mcp/ipixel-mcp.env
+
+# --- Launch -------------------------------------------------------------------
+# Adjust the interpreter path to the venv you installed the server into.
+# Using the module entrypoint keeps it identical to the README run command.
+WorkingDirectory=/opt/ipixel-mcp/server
+ExecStart=/opt/ipixel-mcp/venv/bin/python3 -m ipixel_mcp
+
+# --- Restart / backoff --------------------------------------------------------
+# The BLE link is disposable and the panel sleeps/drops; if the process itself
+# dies (not just the link -- the supervisor handles link drops in-process) we
+# want it back, but with backoff so a hard config error doesn't hot-loop and
+# thrash the SD card with journald writes.
+Restart=on-failure
+RestartSec=5
+
+# Give the BLE connect + MTU exchange a moment on shutdown to release the HCI.
+TimeoutStopSec=15
+
+# --- Logging ------------------------------------------------------------------
+# Log to journald only (no app log files) -> SD-card friendly. Keep prod level
+# at INFO so the library's DEBUG frame-hex path (F-13) never floods the card.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ipixel-mcp
+Environment=IPIXEL_LOGLEVEL=INFO
+# Persisted notification queue lives in the unit's StateDirectory (below), which
+# is writable even under ProtectSystem=strict (review M-6). The default path is
+# under the read-only install dir and would PermissionError on first notify.
+Environment=IPIXEL_NOTIFY_DB=/var/lib/ipixel-mcp/notifications.json
+
+# --- Hardening ----------------------------------------------------------------
+# Tightened, but NOT so tight that BlueZ over D-Bus breaks. BlueZ is reached via
+# the system D-Bus socket + the bluetooth group; we do not need raw net-admin
+# caps for the GATT-client path bleak uses, so we keep caps empty.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+# ^ PrivateDevices MUST stay false-or-relaxed: hiding /dev would also hide the
+#   path BlueZ/bleak need in some stacks. We instead allow the bluetooth class.
+DeviceAllow=char-vchiq rw
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+# ^ Pillow/uvicorn may use JIT-ish paths in some builds; leave W^X off to avoid
+#   surprising crashes. Flip to true and test if you want it stricter.
+
+# Address families: AF_INET/AF_INET6 for the HTTP listener, AF_UNIX for the
+# D-Bus socket to BlueZ, AF_BLUETOOTH for the BLE stack.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_BLUETOOTH
+
+# No new privileges, drop all capabilities (GATT client needs none).
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Writable state for the persisted notification queue (Phase 2). StateDirectory
+# creates/owns /var/lib/ipixel-mcp (mode 0700, chown to User=) and makes it
+# writable under ProtectSystem=strict; it matches IPIXEL_NOTIFY_DB above.
+StateDirectory=ipixel-mcp
+ReadWritePaths=/var/lib/ipixel-mcp
+
+# Resource ceilings (defensive against a runaway image job).
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

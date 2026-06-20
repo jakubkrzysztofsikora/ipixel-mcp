@@ -1,0 +1,32 @@
+{
+  "presets": [
+    {
+      "id": "ascii-heart",
+      "name": "Heart",
+      "category": "ascii",
+      "file": "ascii/heart.txt",
+      "render": { "color": "ff0033", "font": "VCR_OSD_MONO", "speed": 60 }
+    },
+    {
+      "id": "ascii-smile",
+      "name": "Smiley",
+      "category": "ascii",
+      "file": "ascii/smile.txt",
+      "render": { "color": "ffcc00", "font": "VCR_OSD_MONO", "speed": 60 }
+    },
+    {
+      "id": "text-brb",
+      "name": "Be Right Back",
+      "category": "text",
+      "text": "BRB",
+      "render": { "color": "00ccff", "font": "CUSONG", "speed": 70 }
+    },
+    {
+      "id": "text-on-air",
+      "name": "On Air",
+      "category": "text",
+      "text": "ON AIR",
+      "render": { "color": "ff0000", "font": "CUSONG", "speed": 50 }
+    }
+  ]
+}

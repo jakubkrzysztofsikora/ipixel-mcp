@@ -1,0 +1,52 @@
+# cloudflared tunnel config.
+# Lives at /etc/cloudflared/config.yml on the device.
+#
+# Topology (PLAN §2): the public Cloudflare Worker terminates OAuth for claude.ai
+# / Desktop, then fetch()es this tunnel's public hostname. cloudflared receives
+# that request at Cloudflare's edge and forwards it to the loopback origin. The
+# origin therefore never faces the public internet -- it stays "tailnet only" for
+# direct Claude Code use and reachable from the cloud ONLY through this tunnel.
+#
+# The tunnel hostname is protected by a Cloudflare Access policy that requires a
+# *service token*. The Worker presents that service token on every proxied call
+# (CF-Access-Client-Id / CF-Access-Client-Secret headers). The origin then
+# verifies the resulting CF Access JWT itself (PLAN §5 precedence rule 1).
+
+# UUID of the named tunnel created with `cloudflared tunnel create ipixel`.
+# Replace with your real tunnel ID.
+tunnel: 00000000-0000-0000-0000-000000000000
+
+# Credentials file written by `cloudflared tunnel create` (perms 0600).
+# Contains the tunnel's secret -- treat as a secret (see deploy/secrets.md).
+credentials-file: /etc/cloudflared/00000000-0000-0000-0000-000000000000.json
+
+# Don't self-update in place on a read-mostly rootfs; manage via apt instead.
+no-autoupdate: true
+
+# Log to stderr -> journald (no log file on the SD card). loglevel info keeps
+# the card quiet; bump to debug only transiently when troubleshooting.
+loglevel: info
+
+# Ingress rules are evaluated top-to-bottom; the last rule MUST be a catch-all.
+ingress:
+  # Public hostname the Worker dials. Create the DNS route with:
+  #   cloudflared tunnel route dns ipixel board-tunnel.example.com
+  - hostname: board-tunnel.example.com
+    service: http://127.0.0.1:8765
+    originRequest:
+      # The origin is plain HTTP on loopback; no TLS to verify on the last hop.
+      # Keep connections short -- stateless POST request/response (PLAN C-1),
+      # no long-lived SSE, so no need for big stream timeouts.
+      connectTimeout: 10s
+      # Pass through the /healthz and /mcp paths unchanged.
+      httpHostHeader: board-tunnel.example.com
+  # Everything else (probes, scanners) gets a hard 404 -- nothing else is served.
+  - service: http_status:404
+
+# --- Access protection (configured in the Cloudflare dashboard / API, shown
+#     here for reference; it is NOT part of this YAML) --------------------------
+# Create a self-hosted Access application covering board-tunnel.example.com with
+# a policy of action=Service Auth (so interactive humans are blocked) that
+# allows ONLY the service token named e.g. "ipixel-worker". The Worker stores
+# that token's Client-Id/Client-Secret as wrangler secrets and sends them as
+# CF-Access-Client-Id / CF-Access-Client-Secret. Rotation: see deploy/secrets.md.

@@ -1,0 +1,58 @@
+// Tailscale ACL snippet for ipixel-mcp.
+//
+// tailscaled is system-provided; enable it with:
+//     sudo systemctl enable --now tailscaled
+//     sudo tailscale up --advertise-tags=tag:ipixel --ssh
+// (the auth key used for `tailscale up` should be a tagged, reusable,
+//  <=90-day-expiry key minted from the admin console -- see deploy/secrets.md)
+//
+// Paste/merge the relevant blocks into your tailnet policy file at
+// https://login.tailscale.com/admin/acls. HuJSON allows comments + trailing
+// commas. This is a SNIPPET -- merge it into your existing policy, don't blindly
+// overwrite (you'd lock yourself out).
+{
+  // Who is allowed to own/apply the tag:ipixel tag to a node.
+  // Only the operator (and optionally a CI/provisioning identity) should.
+  "tagOwners": {
+    "tag:ipixel": ["autogroup:admin"],
+    // Group of human operators allowed to reach the board for Claude Code.
+    // Replace with your real login(s).
+    "tag:ops": ["autogroup:admin"],
+  },
+
+  // Define the operator group explicitly so the ACL below is readable.
+  "groups": {
+    "group:operators": ["jksikora90@gmail.com"],
+  },
+
+  // Default-deny posture: only the rules below grant access. The Pi running the
+  // origin is tagged tag:ipixel. The MCP origin listens on 8765 (loopback by
+  // design, but if/when a tailnet bind is added this rule scopes who can reach
+  // it). We restrict the origin's MCP port to operators only.
+  "acls": [
+    // Operators -> the board node, MCP port + healthz only. NOT all ports.
+    {
+      "action": "accept",
+      "src": ["group:operators"],
+      "dst": ["tag:ipixel:8765"],
+    },
+    // Allow operators Tailscale SSH to the board for remote admin / log access
+    // on a headless Pi (see deploy/observability.md). Scoped to the ssh user.
+    // (Tailscale SSH is governed by the separate "ssh" block below.)
+  ],
+
+  // Tailscale SSH: operators may SSH to the board as the unix admin user.
+  // This is the remote-access path for a headless Pi without exposing 22 widely.
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["group:operators"],
+      "dst": ["tag:ipixel"],
+      "users": ["pi", "autogroup:nonroot"],
+    },
+  ],
+
+  // Note: tagged-node auth keys must be given a bounded expiry (<=90d) when
+  // minted in the admin console -- ACLs don't enforce key expiry. See
+  // deploy/secrets.md for the rotation runbook.
+}

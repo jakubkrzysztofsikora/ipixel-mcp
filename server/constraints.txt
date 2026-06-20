@@ -1,0 +1,31 @@
+# Tight version pins for the ipixel-mcp origin (security review F-7).
+#
+# Pillow and bleak are the security-/behaviour-sensitive deps: Pillow has a long
+# history of image-parser CVEs (it sits on the untrusted-image path, F-3) and
+# bleak's BLE behaviour varies sharply by version. They are pinned exactly here.
+#
+# NOTE: this is a constraints file (version pins only). Full per-artifact HASH
+# pinning and a resolved uv.lock / pip-compile lockfile land in CI, where the
+# resolver runs with network access and `--require-hashes`. Treat any Pillow
+# bump as security-relevant and run `make audit` (pip-audit) before merging.
+
+# --- runtime ---
+mcp==1.12.0
+starlette==0.40.0
+uvicorn==0.30.6
+# Security-patched fork, installed editable from ../vendor/pypixelcolor:
+#   pip install -e ../vendor/pypixelcolor
+pypixelcolor==0.4.0+ipixel1
+Pillow==11.0.0
+bleak==0.22.3
+
+# --- optional crypto for the CF Access JWT verifier ---
+# auth.py ships a pure-Python RS256 fallback, so PyJWT is optional. When present
+# it can be injected as the rsa_verifier for a vetted implementation.
+PyJWT==2.9.0
+cryptography==43.0.1
+
+# --- dev / CI ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pip-audit==2.7.3
