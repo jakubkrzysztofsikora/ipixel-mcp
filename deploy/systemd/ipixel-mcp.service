@@ -60,6 +60,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ipixel-mcp
 Environment=IPIXEL_LOGLEVEL=INFO
+# Persisted notification queue lives in the unit's StateDirectory (below), which
+# is writable even under ProtectSystem=strict (review M-6). The default path is
+# under the read-only install dir and would PermissionError on first notify.
+Environment=IPIXEL_NOTIFY_DB=/var/lib/ipixel-mcp/notifications.json
 
 # --- Hardening ----------------------------------------------------------------
 # Tightened, but NOT so tight that BlueZ over D-Bus breaks. BlueZ is reached via
@@ -94,10 +98,11 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_BLUETOOTH
 CapabilityBoundingSet=
 AmbientCapabilities=
 
-# Writable paths: none required for a pure-loopback stateless server. If you add
-# the persisted notification queue (Phase 2, small SQLite/JSON), grant it here:
-# ReadWritePaths=/var/lib/ipixel-mcp
-# StateDirectory=ipixel-mcp
+# Writable state for the persisted notification queue (Phase 2). StateDirectory
+# creates/owns /var/lib/ipixel-mcp (mode 0700, chown to User=) and makes it
+# writable under ProtectSystem=strict; it matches IPIXEL_NOTIFY_DB above.
+StateDirectory=ipixel-mcp
+ReadWritePaths=/var/lib/ipixel-mcp
 
 # Resource ceilings (defensive against a runaway image job).
 MemoryMax=256M

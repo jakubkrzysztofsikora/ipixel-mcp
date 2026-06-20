@@ -104,8 +104,10 @@ export const githubAuthHandler = {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // ----- /authorize : start of the OAuth flow ----------------------------
-    if (url.pathname === "/authorize") {
+    // ----- GET /authorize : start of the OAuth flow ------------------------
+    // NB: must be method-gated, else it also swallows the POST handler below and
+    // the consent dialog can never submit (review TOP-1).
+    if (url.pathname === "/authorize" && request.method === "GET") {
       // The provider parses the inbound OAuth 2.1 authorize request for us.
       const oauthReqInfo = await env.OAUTH_PROVIDER.parseAuthRequest(request);
       const clientId = oauthReqInfo.clientId;

@@ -126,6 +126,8 @@ def display_image(
 
     async def _work() -> dict[str, Any]:
         async def _op(client: Any) -> None:
+            # Refuse on a degraded BLE link rather than garble the panel (H-MTU).
+            dm.assert_mtu_ok()
             hex_string = decoded.payload.data.hex()
             # Final encoded-size guard before the (slow) transfer (C-2).
             safety.enforce_encoded_output_size(decoded.payload.data)

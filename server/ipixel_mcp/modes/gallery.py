@@ -231,8 +231,16 @@ async def fetch_image_url(
 async def _default_url_fetcher(url: str) -> bytes:
     import urllib.request  # lazy
 
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        # Refuse to follow redirects (review T-4): a 302 to
+        # http://169.254.169.254 would otherwise bypass the https + public-IP
+        # SSRF guard entirely. Returning None makes urllib raise on a 3xx.
+        def redirect_request(self, *args, **kwargs):  # noqa: ANN001
+            return None
+
     def _read() -> bytes:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - guarded https
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(url, timeout=5) as resp:  # noqa: S310 - guarded https, no redirects
             return resp.read(MAX_FETCH_BYTES + 1)
 
     import asyncio

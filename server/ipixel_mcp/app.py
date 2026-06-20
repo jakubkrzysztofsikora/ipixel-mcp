@@ -11,13 +11,14 @@ lives in ``modes/`` and ``safety.py`` and is tested without ``mcp`` installed).
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import inspect
 import json
 import logging
 import os
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Literal, Optional
 
 from . import auth as auth_mod
 from .auth import AccessJwtVerifier, Principal, Unauthorized, authorize
@@ -25,6 +26,7 @@ from .device import DeviceManager
 from .display_state import DisplayState
 from .jobs import JobRegistry
 from .modes import display
+from .modes import notify as notify_mod
 from .modes.gallery import Gallery
 from .modes.notify import NotificationStore
 from .safety import ValidationError
@@ -45,12 +47,31 @@ DEFAULT_ASSET_ROOT = os.environ.get(
 )
 
 
-# Per-request principal, set by the auth middleware and read by scope-gated tools.
-# A contextvar carries it across the FastMCP tool boundary without threading it
-# through every signature.
+# The authoritative scope gate is the ASGI middleware below: it parses the
+# JSON-RPC ``tools/call`` body and enforces TOOL_SCOPES against the Principal
+# BEFORE the request reaches FastMCP. This avoids relying on a contextvar
+# surviving FastMCP's task-group dispatch (review B-3 — that approach failed
+# open). The contextvar + ``require_scope`` below remain as in-tool defense.
 _current_principal: "contextvars.ContextVar[Optional[Principal]]" = contextvars.ContextVar(
     "ipixel_principal", default=None
 )
+
+# Tool name -> required scope. Used by the middleware (authoritative) and the
+# per-tool ``require_scope`` calls (defense in depth). Reads are gated too so the
+# "every tool is scope-gated" invariant holds (review MED-1).
+TOOL_SCOPES: dict[str, str] = {
+    "display_text": auth_mod.SCOPE_DISPLAY,
+    "display_image": auth_mod.SCOPE_DISPLAY,
+    "display_image_url": auth_mod.SCOPE_DISPLAY,
+    "get_job_status": auth_mod.SCOPE_DISPLAY,
+    "get_device_info": auth_mod.SCOPE_DISPLAY,
+    "get_display_state": auth_mod.SCOPE_DISPLAY,
+    "notify_operator": auth_mod.SCOPE_NOTIFY,
+    "clear_notification": auth_mod.SCOPE_NOTIFY,
+    "list_notifications": auth_mod.SCOPE_NOTIFY,
+    "list_presets": auth_mod.SCOPE_GALLERY,
+    "show_preset": auth_mod.SCOPE_GALLERY,
+}
 
 
 def current_principal() -> Optional[Principal]:
@@ -58,16 +79,59 @@ def current_principal() -> Optional[Principal]:
 
 
 def require_scope(scope: str) -> None:
-    """Raise Unauthorized unless the current principal holds ``scope``.
+    """In-tool defense-in-depth scope check (the middleware is authoritative).
 
-    Used to gate destructive/admin tools (review M-ANNOT). When no principal is
-    present (e.g. a direct unit call), it is treated as authorized so the pure
-    logic stays testable; the ASGI layer guarantees a principal in production.
+    When no principal is on the contextvar (e.g. a direct unit call, or because
+    FastMCP dispatched the tool in a task the contextvar didn't reach) this is a
+    no-op: the ASGI middleware has already enforced the scope before dispatch.
     """
     p = _current_principal.get()
     if p is None:
         return
     p.require(scope)
+
+
+def scope_for_tool_call(body: bytes) -> "tuple[Optional[str], Any]":
+    """Parse a JSON-RPC body; return (required_scope, request_id) for tools/call.
+
+    Returns (None, id) for anything that isn't a scoped tools/call (initialize,
+    tools/list, notifications, unknown tools, or unparseable bodies) so those
+    pass through untouched.
+    """
+    try:
+        msg = json.loads(body)
+    except (ValueError, TypeError):
+        return None, None
+    if not isinstance(msg, dict) or msg.get("method") != "tools/call":
+        return None, (msg.get("id") if isinstance(msg, dict) else None)
+    name = (msg.get("params") or {}).get("name")
+    return TOOL_SCOPES.get(name), msg.get("id")
+
+
+async def _buffer_body(receive) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        event = await receive()
+        if event["type"] == "http.request":
+            chunks.append(event.get("body", b""))
+            if not event.get("more_body", False):
+                break
+        elif event["type"] == "http.disconnect":
+            break
+    return b"".join(chunks)
+
+
+def _replay_receive(body: bytes):
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    return receive
 
 
 class BearerAuthMiddleware:
@@ -106,11 +170,39 @@ class BearerAuthMiddleware:
             return
 
         scope.setdefault("state", {})["principal"] = principal
+
+        # Authoritative scope enforcement: parse the JSON-RPC body and gate
+        # tools/call against the granted scopes BEFORE FastMCP dispatch (B-3).
+        if scope.get("method") == "POST":
+            body = await self._buffer_or_passthrough(scope, receive)
+            required, req_id = scope_for_tool_call(body)
+            if required is not None and required not in principal.scopes:
+                return await self._jsonrpc_forbidden(send, req_id, required)
+            receive = _replay_receive(body)
+
         token = _current_principal.set(principal)
         try:
             await self.app(scope, receive, send)
         finally:
             _current_principal.reset(token)
+
+    async def _buffer_or_passthrough(self, scope, receive) -> bytes:
+        return await _buffer_body(receive)
+
+    @staticmethod
+    async def _jsonrpc_forbidden(send, req_id, scope_name: str) -> None:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32001, "message": f"forbidden: missing scope {scope_name}"},
+        }
+        body = json.dumps(payload).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 def _guard(fn):
@@ -193,7 +285,7 @@ def build_mcp(
     @_guard
     async def display_image(  # noqa: ANN001
         image_base64: str,
-        format: str,
+        format: Literal["png", "gif", "jpeg"],
         slot: int = display.DEFAULT_SLOT,
         source: str = "display",
     ) -> dict:
@@ -217,7 +309,7 @@ def build_mcp(
     @_guard
     async def display_image_url(  # noqa: ANN001
         image_url: str,
-        format: str,
+        format: Literal["png", "gif", "jpeg"],
         slot: int = display.DEFAULT_SLOT,
         source: str = "display",
     ) -> dict:
@@ -266,7 +358,7 @@ def build_mcp(
     async def notify_operator(  # noqa: ANN001
         message: str,
         source: str,
-        level: str = "info",
+        level: Literal["info", "warn", "blocked"] = "info",
         ttl_seconds: float = 300.0,
     ) -> dict:
         require_scope(auth_mod.SCOPE_NOTIFY)
@@ -275,13 +367,20 @@ def build_mcp(
         )
 
     @mcp.tool(
-        description="Clear a notification (or all if id omitted); restores prior display.",
+        description=(
+            "Clear notifications and restore the prior display. Pass notification_id "
+            "for one, or source to clear only that agent's banners (use this in a "
+            "Claude Code Stop hook so it clears just its own), or neither to clear all."
+        ),
         annotations={"destructiveHint": True},
     )
     @_guard
-    async def clear_notification(notification_id: Optional[str] = None) -> dict:  # noqa: ANN001
+    async def clear_notification(  # noqa: ANN001
+        notification_id: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> dict:
         require_scope(auth_mod.SCOPE_NOTIFY)
-        return notifications.clear_notification(notification_id)
+        return notifications.clear_notification(notification_id, source=source)
 
     @mcp.tool(
         description="List active notifications (id, level, message, source, age).",
@@ -299,12 +398,15 @@ def build_mcp(
         annotations={"readOnlyHint": True},
     )
     @_guard
-    async def list_presets(category: Optional[str] = None) -> dict:  # noqa: ANN001
+    async def list_presets(  # noqa: ANN001
+        category: Optional[Literal["image", "ascii", "text"]] = None,
+    ) -> dict:
         require_scope(auth_mod.SCOPE_GALLERY)
         return gallery.list_presets(category)
 
     @mcp.tool(
         description="Render a curated preset by id. The cheap, model-friendly image path.",
+        annotations={"destructiveHint": False},
     )
     @_guard
     async def show_preset(preset_id: str, slot: int = display.DEFAULT_SLOT) -> dict:  # noqa: ANN001
@@ -366,8 +468,20 @@ def build_app(
 
     jobs = jobs or JobRegistry()
     display_state = display_state or DisplayState()
+
+    # B-4: actually paint the banner on the board when a notification arrives.
+    # Note (review T-1): this goes through the single BLE lock, so an in-flight
+    # 120 s image job delays the banner — accepted limitation, tracked in PLAN.
+    async def _render_notification(n) -> None:  # noqa: ANN001
+        await display.display_text(
+            dm,
+            text=n.message,
+            color=notify_mod.LEVEL_COLOR.get(n.level, "ffffff"),
+            slot=notify_mod.NOTIFY_SLOT,
+        )
+
     notifications = notifications or NotificationStore(
-        path=notify_db, display_state=display_state
+        path=notify_db, display_state=display_state, render=_render_notification
     )
     gallery = gallery or Gallery(asset_root)
 
@@ -377,10 +491,23 @@ def build_app(
     )
     mcp_app = mcp.streamable_http_app()
 
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app):
+        # B-2: run FastMCP's StreamableHTTP session manager (its task group must
+        # start, or the first /mcp request 500s). B-1: start the reconnect
+        # supervisor. T-2: drain jobs + close the link cleanly on shutdown.
+        async with mcp.session_manager.run():
+            dm.start_supervisor()
+            try:
+                yield
+            finally:
+                await jobs.drain()
+                await dm.close()
+
     async def healthz(request):  # noqa: ANN001
         return JSONResponse(dm.health())
 
-    app = Starlette(routes=[Route("/healthz", healthz)])
+    app = Starlette(routes=[Route("/healthz", healthz)], lifespan=_lifespan)
     app.mount("/", mcp_app)
     return BearerAuthMiddleware(
         app, static_token=static_token, access_jwt_verifier=access_jwt_verifier

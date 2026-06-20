@@ -18,6 +18,7 @@ Hardware-free: the device-render callback and the clock are injected.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -124,6 +125,9 @@ class NotificationStore:
         self._render = render
         self._clock = clock
         self._items: dict[str, Notification] = {}
+        # Serialises the async mutator so a render-await can't interleave a
+        # read-modify-write of the persisted queue (review T-3).
+        self._lock = asyncio.Lock()
         self._load()
 
     # -- persistence ----------------------------------------------------------
@@ -193,6 +197,10 @@ class NotificationStore:
         level = _validate_level(level)
         source = _validate_source(source)
         ttl = _validate_ttl(ttl_seconds)
+        async with self._lock:
+            return await self._notify_locked(message, level, source, ttl)
+
+    async def _notify_locked(self, message, level, source, ttl):  # noqa: ANN001
         self._expire()
 
         n = Notification(
@@ -231,28 +239,46 @@ class NotificationStore:
             "message": f"Notification queued (slot {NOTIFY_SLOT}, volatile).",
         }
 
-    def clear_notification(self, notification_id: Optional[str] = None) -> dict[str, Any]:
-        """Remove one (or all) notifications; restore the display.
+    def clear_notification(
+        self,
+        notification_id: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Remove notifications; restore the display.
 
-        Clear-of-unknown-id is a no-op (review smaller-flags).
+        Precedence: by ``notification_id`` (one), else by ``source`` (all from
+        that agent — the correct default for the Claude Code Stop hook so it only
+        clears its own banners, review TOP-2), else all. Clear-of-unknown is a
+        no-op (review smaller-flags).
         """
         self._expire()
-        if notification_id is None:
-            for n in list(self._items.values()):
-                if n.level == "blocked":
-                    self._display.clear_preempt(ref_id=n.id)
-            cleared = len(self._items)
-            self._items.clear()
-            self._save()
-            return {"ok": True, "cleared": cleared}
 
-        n = self._items.pop(notification_id, None)
-        if n is None:
-            return {"ok": True, "cleared": 0}  # unknown id → no-op
-        if n.level == "blocked":
-            self._display.clear_preempt(ref_id=n.id)
+        def _drop(n: Notification) -> None:
+            self._items.pop(n.id, None)
+            if n.level == "blocked":
+                self._display.clear_preempt(ref_id=n.id)
+
+        if notification_id is not None:
+            n = self._items.get(notification_id)
+            if n is None:
+                return {"ok": True, "cleared": 0}  # unknown id → no-op
+            _drop(n)
+            self._save()
+            return {"ok": True, "cleared": 1}
+
+        if source is not None:
+            src = source.strip()
+            matches = [n for n in list(self._items.values()) if n.source == src]
+            for n in matches:
+                _drop(n)
+            self._save()
+            return {"ok": True, "cleared": len(matches)}
+
+        cleared = len(self._items)
+        for n in list(self._items.values()):
+            _drop(n)
         self._save()
-        return {"ok": True, "cleared": 1}
+        return {"ok": True, "cleared": cleared}
 
     def list_notifications(self) -> dict[str, Any]:
         self._expire()

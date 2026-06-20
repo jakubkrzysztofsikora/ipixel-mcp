@@ -261,3 +261,55 @@ runbook; tunnel/Access/tailnet-key renewal; no remote log access on a headless P
 - **Cloudflare Worker for the public path + Claude Code direct on the tailnet** is the
   correct topology given Anthropic-cloud-origin reachability.
 - **Curated, validated, bytes-bounded subset** (never naive pass-through) is correct.
+
+---
+
+# Round 2 — review of the IMPLEMENTATION (post-fan-out)
+
+After the four phases were implemented, the **same three personas** audited the real
+code. They confirmed the pure domain logic was solid and well-tested (108 tests) but
+found that several review "bars" were **not met at the integration seam** — invisible to
+the suite because `mcp`/`bleak`/`Pillow` aren't installed in CI. All consequential
+findings below were **fixed** in the same pass; tests now: **server 119, worker 25**.
+
+## Fixed
+
+| ID | Finding | Fix |
+|----|---------|-----|
+| B-2 | `/mcp` would 500 on first request — FastMCP session-manager lifespan was dropped when mounting under Starlette | `build_app` now runs `mcp.session_manager.run()` in a Starlette `lifespan` |
+| B-1 | reconnect supervisor never started in prod | lifespan calls `dm.start_supervisor()`; drains jobs + `dm.close()` on shutdown (T-2) |
+| B-3 | scope gating **failed open** — the principal contextvar didn't survive FastMCP's task-group dispatch | authoritative **ASGI scope enforcement**: middleware parses the JSON-RPC `tools/call` body and gates `TOOL_SCOPES` against the Principal *before* dispatch (fail-closed); `require_scope` kept as in-tool defense. New tests in `test_app_scopes.py` |
+| B-4 | Mode-B notifications never painted the board (no `render` wired) | `build_app` wires a `render` callback that paints the level-coloured banner via `display_text` |
+| TOP-1 (worker) | dead `POST /authorize` branch → consent dialog could never submit (first-time auth broken) | method-gated the GET branch; `test/authorize-routing.test.ts` |
+| TOP-2 | `clear_notification` didn't accept the `source` the Stop-hook sends → cleared *all* agents' banners | added `source` filter (clear only that agent's); enum-typed `level` |
+| TOP-3 | vague tool input schemas | `Literal` enums for `level`/`format`/`category` (model self-corrects) |
+| H-WEDGE | ACK-timeout (`cur12k_no_answer`) wasn't recognised as link-recyclable → wedge risk | added `no_answer`/`no ack`/`cur12k`/`timed out` to `_DISCONNECT_MARKERS` (execute now recycles + retries) |
+| H-MTU | MTU read off the wrong object (always `None`); enforcement cosmetic | read `._session._client.mtu_size`; `assert_mtu_ok()` **refuses** image transfers on a known-degraded link (image `_op` calls it) |
+| T-3 | notification queue had no lock around the render-await read-modify-write | `asyncio.Lock` around the async mutator |
+| T-4 | SSRF guard bypassable via 3xx redirect to metadata IP | fetcher uses a no-redirect opener |
+| MED-1 | reads (`get_device_info`/`get_job_status`) weren't scope-gated | covered by `TOOL_SCOPES` middleware |
+| MED-3 | Worker forwarded `www-authenticate` back to claude.ai | dropped from the forwarded-header allow-list |
+| M-6 | persisted notify DB unwritable under `ProtectSystem=strict` | unit sets `StateDirectory`/`ReadWritePaths` + `IPIXEL_NOTIFY_DB=/var/lib/ipixel-mcp/...` |
+
+## Residual / tracked (NOT fixed — accepted or needs upstream)
+
+- **F-8 ACK forgery / stale-ACK (inherent upstream):** pypixelcolor's notify handler
+  accepts any `0x05…{0,1,3}` frame with no window correlation. Not mitigable without an
+  upstream patch; the single-flight lock prevents *concurrent* corruption only. Accepted
+  residual; flagged for an upstream PR.
+- **True MTU chunk fix:** the library hardcodes a 244-byte chunk size; we can only
+  *refuse* on a degraded link, not re-chunk. Real fix needs an upstream patch threading
+  `chunk_size` into `_build_send_plan`. Tracked.
+- **T-1 notify preempt is not cancellation:** a `blocked` banner still queues behind an
+  in-flight 120 s image job (single BLE lock). Accepted; documented at the call site.
+  A true preempt (cancel/interpose the in-flight op) is a future enhancement.
+- **M-2 `source` is caller-supplied** (spoofable ownership label). Low impact for a
+  single operator; deriving it from the principal is a follow-up.
+- **Encoded-size cap measures input, not re-encoded output** (a small-but-expanding GIF
+  could still exceed 120 s, but fails cleanly via the timeout→recycle path).
+- **Dependency hash-lock (F-7):** `constraints.txt` pins versions; per-artifact hashes /
+  `uv.lock` + `pip-audit` in CI remain a Phase-3 task.
+- **NIT-2:** image gallery resources advertise `image/png` but `read_resource` returns
+  JSON; serve real blob bytes or relabel — minor.
+- **Worker** remains verified by `tsc --noEmit` + `vitest` only; a `wrangler deploy
+  --dry-run` against a real account is still required before go-live.

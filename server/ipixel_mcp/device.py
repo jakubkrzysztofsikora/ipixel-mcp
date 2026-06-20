@@ -40,6 +40,13 @@ _DISCONNECT_MARKERS = (
     "service discovery",
     "no longer connected",
     "connection lost",
+    # ACK/window timeouts from pypixelcolor's send_plan: these leave the device's
+    # transfer state machine mid-window, so the link MUST be recycled to avoid a
+    # wedged panel (review H-WEDGE). The library raises e.g. "cur12k_no_answer".
+    "no_answer",
+    "no ack",
+    "cur12k",
+    "timed out",
 )
 
 
@@ -166,15 +173,34 @@ class DeviceManager:
             self._device_info = None
 
     def _check_mtu(self, client: BleClient) -> None:
-        # pypixelcolor doesn't expose MTU directly; read it opportunistically.
-        mtu = getattr(client, "mtu_size", None) or getattr(client, "mtu", None)
+        # pypixelcolor's AsyncClient does not expose MTU directly; the real value
+        # lives on the underlying Bleak client at ._session._client.mtu_size
+        # (review H-MTU — reading it off AsyncClient always returned None).
+        mtu = (
+            getattr(client, "mtu_size", None)
+            or getattr(getattr(getattr(client, "_session", None), "_client", None), "mtu_size", None)
+            or getattr(client, "mtu", None)
+        )
         self._mtu = int(mtu) if isinstance(mtu, int) else None
         if self._mtu is not None and self._mtu < EXPECTED_MTU:
             logger.warning(
                 "negotiated MTU %s < expected %s; the library's 244-byte chunking "
-                "may corrupt transfers on this link",
+                "would corrupt transfers — image ops will be refused on this link",
                 self._mtu,
                 EXPECTED_MTU,
+            )
+
+    def assert_mtu_ok(self) -> None:
+        """Refuse media transfers on a degraded link (review H-MTU).
+
+        We cannot change pypixelcolor's hardcoded 244-byte chunk size, so when the
+        negotiated MTU is known to be below what that chunking assumes we fail the
+        transfer cleanly rather than silently garbling the panel. An unknown MTU
+        (``None``) is allowed through (best effort) but logged at connect time.
+        """
+        if self._mtu is not None and self._mtu < EXPECTED_MTU:
+            raise DeviceError(
+                "BLE link MTU too small for a safe image transfer; reconnect the board"
             )
 
     # -- operation execution --------------------------------------------------

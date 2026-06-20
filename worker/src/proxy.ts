@@ -45,7 +45,10 @@ export const FORWARD_RESPONSE_HEADERS: readonly string[] = [
   "cache-control",
   "mcp-protocol-version",
   "mcp-session-id",
-  "www-authenticate",
+  // NB: www-authenticate is deliberately NOT forwarded (review MED-3). The
+  // Worker is the sole OAuth authority on the public path; the origin advertises
+  // no OAuth (E-1), so relaying an auth challenge from it would only confuse
+  // claude.ai's discovery state machine.
 ];
 
 /** Build the joined upstream URL: ORIGIN_URL + "/mcp" (no double slashes). */
