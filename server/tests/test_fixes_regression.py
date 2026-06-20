@@ -18,18 +18,13 @@ def test_ack_timeout_errors_are_disconnect_class():
 
 # ---- H-MTU: gate refuses on a known-degraded link, allows unknown -------------
 
-def test_assert_mtu_ok():
+def test_assert_mtu_ok_is_informational():
+    # The vendored fork chunks by the negotiated MTU, so a small MTU no longer
+    # corrupts — assert_mtu_ok only logs and must never raise.
     dm = DeviceManager("X", client_factory=lambda a: None)
-    dm._mtu = None
-    dm.assert_mtu_ok()  # unknown MTU is allowed (best effort)
-    dm._mtu = device_mod.EXPECTED_MTU
-    dm.assert_mtu_ok()  # healthy
-    dm._mtu = 23
-    try:
-        dm.assert_mtu_ok()
-        assert False, "expected refusal on degraded MTU"
-    except DeviceError:
-        pass
+    for mtu in (None, device_mod.EXPECTED_MTU, 23):
+        dm._mtu = mtu
+        dm.assert_mtu_ok()  # no exception for any value
 
 
 def test_mtu_read_reaches_nested_bleak_client():

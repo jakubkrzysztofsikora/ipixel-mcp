@@ -313,3 +313,33 @@ findings below were **fixed** in the same pass; tests now: **server 119, worker 
   JSON; serve real blob bytes or relabel — minor.
 - **Worker** remains verified by `tsc --noEmit` + `vitest` only; a `wrangler deploy
   --dry-run` against a real account is still required before go-live.
+
+---
+
+# Round 3 — library forked and patched at the source
+
+Per the user's direction, the upstream issues that earlier rounds had deferred as
+"needs an upstream patch" were fixed **in the library itself**. `pypixelcolor` is now
+vendored as a patched fork at [`../vendor/pypixelcolor/`](../vendor/pypixelcolor/)
+(`SECURITY-PATCHES.md` there lists every change; `tests_security/` proves them — 10
+tests, plus the fork's 2 native tests still pass). The server depends on it
+(`pypixelcolor==0.4.0+ipixel1`, installed editable).
+
+**Now fixed in the library (previously residual):**
+- **H-MTU** — `send_plan` chunks by the negotiated ATT MTU (`effective_chunk_size`),
+  no longer a hardcoded 244; the server's hard MTU *refusal* was downgraded to
+  informational since a small MTU is now safe (just slower).
+- **F-5** `set_pixel` colour validation (the inverted condition) + coordinate bounds.
+- **F-6** `num_chars` single-byte overflow on long/emoji-heavy text.
+- **F-8** ACK handling now accepts only the strict 5-byte `0x05` frame (the permissive
+  fallback that misread oversized frames is gone).
+- **F-3** image decompression-bomb + GIF frame-count guards at decode time.
+- **F-1** the bundled WebSocket server gained optional bearer-token auth (loopback
+  default kept).
+- **F-11** (partial) closed the leaked PIL handle in the format-convert path.
+
+**Still genuinely residual:** F-8 *sequence* correlation (the protocol has no window
+index, so stale-within-transfer ACKs can't be fully ruled out — strict-frame validation
+is the available mitigation); F-2 path API and F-12 emoji fetch (mitigated at the
+wrapper, not altered upstream); per-chunk `response=True` throughput. These are flagged
+for the upstream PRs.

@@ -14,7 +14,10 @@ dependencies = [
     "mcp>=1.12,<2",
     "starlette>=0.37,<1",
     "uvicorn[standard]>=0.30,<1",
-    "pypixelcolor==0.4.0",
+    # Vendored, security-patched fork (see ../vendor/pypixelcolor/SECURITY-PATCHES.md).
+    # The local version tag means only the fork satisfies this — install it with
+    # `pip install -e ../vendor/pypixelcolor` before/with this package.
+    "pypixelcolor==0.4.0+ipixel1",
     "Pillow>=10.3,<12",
     "bleak>=0.22,<0.24",
 ]

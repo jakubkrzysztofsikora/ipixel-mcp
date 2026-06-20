@@ -13,7 +13,9 @@
 mcp==1.12.0
 starlette==0.40.0
 uvicorn==0.30.6
-pypixelcolor==0.4.0
+# Security-patched fork, installed editable from ../vendor/pypixelcolor:
+#   pip install -e ../vendor/pypixelcolor
+pypixelcolor==0.4.0+ipixel1
 Pillow==11.0.0
 bleak==0.22.3
 

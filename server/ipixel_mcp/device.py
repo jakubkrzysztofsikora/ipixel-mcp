@@ -191,16 +191,16 @@ class DeviceManager:
             )
 
     def assert_mtu_ok(self) -> None:
-        """Refuse media transfers on a degraded link (review H-MTU).
+        """Informational MTU check (review H-MTU).
 
-        We cannot change pypixelcolor's hardcoded 244-byte chunk size, so when the
-        negotiated MTU is known to be below what that chunking assumes we fail the
-        transfer cleanly rather than silently garbling the panel. An unknown MTU
-        (``None``) is allowed through (best effort) but logged at connect time.
+        The vendored pypixelcolor fork now chunks by the *negotiated* MTU
+        (``effective_chunk_size``), so a small MTU only slows a transfer down — it
+        no longer corrupts the panel. We therefore just log; we do not refuse.
         """
         if self._mtu is not None and self._mtu < EXPECTED_MTU:
-            raise DeviceError(
-                "BLE link MTU too small for a safe image transfer; reconnect the board"
+            logger.info(
+                "BLE MTU %s < %s; transfer will be chunked smaller and run slower",
+                self._mtu, EXPECTED_MTU,
             )
 
     # -- operation execution --------------------------------------------------

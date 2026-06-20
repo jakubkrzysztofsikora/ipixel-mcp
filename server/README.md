@@ -10,12 +10,15 @@ See [`../docs/PLAN.md`](../docs/PLAN.md) (v2) and
 - `ipixel_mcp/device.py` — **disposable-link** BLE manager: single-flight lock,
   per-op `asyncio.wait_for` timeouts, retry-once-on-disconnect, reconnect
   supervisor + circuit breaker, MTU check, `health()`. (Phase 0)
-- `ipixel_mcp/ble_backend.py` — thin **hardened adapter** over
-  `pypixelcolor.AsyncClient` (lazy import). Reads/enforces the negotiated MTU and
-  derives a safe chunk size, **refusing** transfers on a degraded link rather
-  than corrupting the panel (review H-MTU). Exposes only
-  connect/disconnect/get_device_info/send_text/send_image_hex (bytes-only, never
-  a filesystem path — F-2). We do **not** vendor the whole upstream library.
+- `ipixel_mcp/ble_backend.py` — thin adapter over `pypixelcolor.AsyncClient`
+  (lazy import) exposing only connect/disconnect/get_device_info/send_text/
+  send_image_hex (bytes-only, never a filesystem path — F-2).
+- **`../vendor/pypixelcolor/`** — a **security-patched fork** of the upstream
+  library (see its `SECURITY-PATCHES.md`). The real bug fixes now live *in the
+  library*: MTU-aware chunking (H-MTU), `set_pixel` validation (F-5),
+  `num_chars` overflow (F-6), strict ACK frames (F-8), image bomb/frame guards
+  (F-3), and optional WebSocket auth (F-1). Install it editable:
+  `pip install -e ../vendor/pypixelcolor`.
 - `ipixel_mcp/safety.py` — input validation + limits (F-2/F-3/F-5/F-6,
   H-BOOTLOOP) **plus** a hardened image decode (`decode_and_prepare_image`):
   sets `Image.MAX_IMAGE_PIXELS`, treats the decompression-bomb warning as an
@@ -79,6 +82,7 @@ make audit               # pip-audit against constraints.txt (needs network)
 ## Run (on the device host)
 
 ```bash
+pip install -e ../vendor/pypixelcolor   # the security-patched fork (provides pypixelcolor)
 pip install -e . -c constraints.txt
 export IPIXEL_ADDRESS="AA:BB:CC:DD:EE:FF"
 export IPIXEL_STATIC_TOKEN="$(openssl rand -hex 32)"
@@ -97,9 +101,9 @@ claude mcp add --transport http ipixel http://<host>:8765/mcp \
 
 ## Known limitations (tracked in the plan)
 
-- The BLE adapter **refuses** transfers when the negotiated MTU is below the
-  upstream-assumed 247; honouring a smaller MTU needs an upstream patch to
-  `pypixelcolor`'s hardcoded 244-byte chunk size.
+- **MTU is now handled in the vendored fork** — `send_plan` chunks by the
+  negotiated ATT MTU, so a degraded link slows down instead of corrupting; the
+  server's `assert_mtu_ok` is now informational only.
 - `constraints.txt` pins versions; per-artifact hashes + uv-lock land in CI.
 - BLE protocol/ACK behaviour is only exercisable on real hardware — see the
   manual smoke-test checklist in the plan; CI covers schema + manager + mode
