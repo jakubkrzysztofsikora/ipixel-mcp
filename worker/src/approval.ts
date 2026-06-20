@@ -59,6 +59,32 @@ async function verify(
   return diff === 0;
 }
 
+// ----- signed OAuth state (review: state was unsigned/tamperable) ------------
+
+/** Sign an object into an opaque, integrity-protected `state` string. */
+export async function signState(secret: string, obj: unknown): Promise<string> {
+  const payload = btoa(JSON.stringify(obj));
+  const signature = await sign(secret, payload);
+  return `${signature}.${payload}`;
+}
+
+/** Verify + decode a signed `state`. Returns null on tamper/format error. */
+export async function verifyState(
+  secret: string,
+  state: string,
+): Promise<unknown | null> {
+  const dot = state.indexOf(".");
+  if (dot === -1) return null;
+  const signature = state.slice(0, dot);
+  const payload = state.slice(dot + 1);
+  if (!(await verify(secret, payload, signature))) return null;
+  try {
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+
 // ----- cookie parsing --------------------------------------------------------
 
 function parseCookies(header: string | null): Record<string, string> {

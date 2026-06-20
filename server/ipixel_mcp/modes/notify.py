@@ -239,7 +239,7 @@ class NotificationStore:
             "message": f"Notification queued (slot {NOTIFY_SLOT}, volatile).",
         }
 
-    def clear_notification(
+    async def clear_notification(
         self,
         notification_id: Optional[str] = None,
         source: Optional[str] = None,
@@ -250,7 +250,17 @@ class NotificationStore:
         that agent — the correct default for the Claude Code Stop hook so it only
         clears its own banners, review TOP-2), else all. Clear-of-unknown is a
         no-op (review smaller-flags).
+
+        Acquires the same lock as ``notify_operator`` so a clear cannot interleave
+        with an in-flight render (PR review: otherwise a finishing render could
+        overwrite the board after the notification was cleared).
         """
+        async with self._lock:
+            return self._clear_locked(notification_id, source)
+
+    def _clear_locked(
+        self, notification_id: Optional[str], source: Optional[str]
+    ) -> dict[str, Any]:
         self._expire()
 
         def _drop(n: Notification) -> None:

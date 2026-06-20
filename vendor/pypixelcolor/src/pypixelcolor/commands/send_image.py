@@ -222,6 +222,7 @@ def _resize_image(file_bytes: bytes, is_gif: bool, target_width: int, target_hei
     # metadata (duration, disposal, palette) is normalized and consistent.
     if not needs_resize and not needs_conversion and not is_gif:
         logger.debug(f"Image already at target size {target_width}x{target_height} and in correct mode")
+        img.close()  # don't leak the handle on the early-return path (PR review)
         return file_bytes
     
     if needs_resize:
@@ -309,7 +310,8 @@ def _resize_image(file_bytes: bytes, is_gif: bool, target_width: int, target_hei
         
         # Size
         logger.info(f"Resized GIF to {len(output.getvalue())} bytes")
-        
+
+        img.close()
         return output.getvalue()
     else:
         # Handle static image (PNG)
@@ -324,7 +326,8 @@ def _resize_image(file_bytes: bytes, is_gif: bool, target_width: int, target_hei
         resized_img = resized_img.convert('RGB')
         output = BytesIO()
         resized_img.save(output, format='PNG')
-        
+
+        img.close()
         return output.getvalue()
 
 def _process_loaded_bytes(file_bytes: bytes, extension: str) -> tuple[bytes, bool]:

@@ -107,3 +107,18 @@ def test_healthz_is_exempt():
     mw = BearerAuthMiddleware(rec, static_token=STATIC)
     _run_request(mw, _scope(method="GET", path="/healthz"), b"")
     assert rec.called
+
+
+def test_jsonrpc_batch_is_rejected():
+    # JSON-RPC batches are refused so a batched tools/call can't bypass the
+    # single-message scope gate (PR review).
+    rec = _Recorder()
+    mw = BearerAuthMiddleware(rec, static_token=STATIC)
+    batch = json.dumps([
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "display_text"}},
+    ]).encode()
+    scope = _scope(headers={"authorization": f"Bearer {STATIC}"})
+    sent = _run_request(mw, scope, batch)
+    assert not rec.called
+    assert sent[0]["status"] == 400
+    assert json.loads(sent[1]["body"])["error"]["code"] == -32600

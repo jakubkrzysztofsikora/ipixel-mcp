@@ -12,7 +12,8 @@ export interface GrantProps {
   login: string;
   /** Granted MCP scopes (e.g. ["ipixel:display", ...]). */
   scopes: string[];
-  [key: string]: unknown;
+  // No index signature on purpose (review): keep grant props minimal so an
+  // accidental extra/sensitive field is a compile-time error, not silently stored.
 }
 
 /** Full Worker env: bindings + vars + secrets (see wrangler.jsonc). */

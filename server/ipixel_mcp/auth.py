@@ -256,10 +256,16 @@ def make_access_jwt_verifier(
 
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
 
-        # Try the cached JWKS; on a kid miss, refresh once (key rotation).
-        jwk = _select_jwk(_get_jwks(), kid)
-        if jwk is None:
-            jwk = _select_jwk(_get_jwks(force=True), kid)
+        # Try the cached JWKS; on a kid miss, refresh once (key rotation). A JWKS
+        # fetch failure (endpoint down/unreachable) must fail CLOSED — return
+        # False so the caller gets a clean 401, not a 500 (PR review).
+        try:
+            jwk = _select_jwk(_get_jwks(), kid)
+            if jwk is None:
+                jwk = _select_jwk(_get_jwks(force=True), kid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("JWKS unavailable, rejecting token: %r", exc)
+            return False
         if jwk is None:
             return False
         try:

@@ -5,8 +5,13 @@ BLE LED matrix boards from **Claude.ai web**, **Claude Desktop**, and **Claude C
 served over a **Tailscale** tailnet, with a **Cloudflare Worker** terminating OAuth 2.1
 (Dynamic Client Registration compatible) and proxying to the tailnet origin.
 
-> **Status:** design phase. This repo currently contains the security review of the
-> underlying library and the implementation plan. Code lands per the phases in the plan.
+> **Status:** Phases 0–4 implemented and tested (hardware-free); pre-hardware /
+> pre-deploy. The repo contains the security review + plan **and** the working
+> code: the Python origin server (`server/`, 3 modes), the Cloudflare Worker
+> (`worker/`), a security-patched `pypixelcolor` fork (`vendor/pypixelcolor/`),
+> and deploy + client examples (`deploy/`, `examples/`). Remaining: real-hardware
+> BLE smoke test, live Cloudflare/Tailscale deploy, and Phase-5 polish
+> (rate limiting, metrics). See [docs/PLAN.md](docs/PLAN.md) §7 for phase status.
 
 ## Modes
 

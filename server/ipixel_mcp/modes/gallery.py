@@ -173,6 +173,11 @@ def _default_resolver(host: str) -> "list[str]":
 def _is_public_ip(ip_str: str) -> bool:
     try:
         ip = ipaddress.ip_address(ip_str)
+        # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) reports is_private/is_loopback
+        # as False but the OS connects to the mapped IPv4 — unmap before checking
+        # so the SSRF guard isn't bypassed (PR review, security-high).
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
     except ValueError:
         return False
     return not (
@@ -232,20 +237,68 @@ async def fetch_image_url(
 
 
 async def _default_url_fetcher(url: str) -> bytes:
-    import urllib.request  # lazy
+    """Fetch an https image with the connection PINNED to a validated IP.
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        # Refuse to follow redirects (review T-4): a 302 to
-        # http://169.254.169.254 would otherwise bypass the https + public-IP
-        # SSRF guard entirely. Returning None makes urllib raise on a 3xx.
-        def redirect_request(self, *args, **kwargs):  # noqa: ANN001
-            return None
-
-    def _read() -> bytes:
-        opener = urllib.request.build_opener(_NoRedirect)
-        with opener.open(url, timeout=5) as resp:  # noqa: S310 - guarded https, no redirects
-            return resp.read(MAX_FETCH_BYTES + 1)
-
+    Closes the DNS-rebinding TOCTOU (PR review, security-medium): we resolve the
+    host once, verify *that* address is a public unicast IP, then open the TLS
+    connection to that exact IP (SNI/cert still validated against the hostname).
+    A second, attacker-controlled resolution can't swap in a private/metadata IP,
+    and redirects are refused.
+    """
     import asyncio
 
-    return await asyncio.to_thread(_read)
+    return await asyncio.to_thread(_pinned_https_get, url)
+
+
+def _pinned_https_get(url: str) -> bytes:
+    import http.client
+    import socket
+    import ssl
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise safety.ValidationError("image_url must be https")
+    host = parsed.hostname
+    port = parsed.port or 443
+    if not host:
+        raise safety.ValidationError("image_url has no host")
+
+    # Resolve ONCE; validate; connect to that exact address.
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise safety.ValidationError("image_url host could not be resolved") from exc
+    addr = None
+    for info in infos:
+        ip = info[4][0]
+        if _is_public_ip(ip):
+            addr = (info[0], ip)
+            break
+    if addr is None:
+        raise safety.ValidationError("image_url resolves to a non-public address")
+    family, ip = addr
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    ctx = ssl.create_default_context()
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        sock.connect((ip, port))
+        tls = ctx.wrap_socket(sock, server_hostname=host)  # SNI + cert checked vs host
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.sock = tls
+        conn.request("GET", path, headers={"Host": host, "User-Agent": "ipixel-mcp"})
+        resp = conn.getresponse()
+        if resp.status in (301, 302, 303, 307, 308):
+            raise safety.ValidationError("redirects are not allowed for image_url")
+        if resp.status != 200:
+            raise safety.ValidationError(f"image fetch failed (HTTP {resp.status})")
+        return resp.read(MAX_FETCH_BYTES + 1)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass

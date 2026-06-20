@@ -30,6 +30,8 @@ import {
   clientIdAlreadyApproved,
   parseRedirectApproval,
   renderApprovalDialog,
+  signState,
+  verifyState,
 } from "./approval";
 
 const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
@@ -120,7 +122,7 @@ export const githubAuthHandler = {
       if (
         await clientIdAlreadyApproved(request, clientId, env.COOKIE_SECRET)
       ) {
-        return redirectToGithub(request, env, oauthReqInfo);
+        return await redirectToGithub(request, env, oauthReqInfo);
       }
 
       // Otherwise render a minimal consent dialog; submit posts back here.
@@ -140,7 +142,7 @@ export const githubAuthHandler = {
       if (!state.oauthReqInfo) {
         return new Response("Invalid approval", { status: 400 });
       }
-      return redirectToGithub(request, env, state.oauthReqInfo, headers);
+      return await redirectToGithub(request, env, state.oauthReqInfo, headers);
     }
 
     // ----- /callback : GitHub redirected back ------------------------------
@@ -151,12 +153,12 @@ export const githubAuthHandler = {
         return new Response("Missing code/state", { status: 400 });
       }
 
-      // State carries the original OAuth request info (base64 JSON).
-      let oauthReqInfo: any;
-      try {
-        oauthReqInfo = JSON.parse(atob(stateParam));
-      } catch {
-        return new Response("Invalid state", { status: 400 });
+      // State carries the original OAuth request info, HMAC-signed with
+      // COOKIE_SECRET so a tampered clientId/redirect can't reach
+      // completeAuthorization (review: state was previously unsigned base64).
+      const oauthReqInfo: any = await verifyState(env.COOKIE_SECRET, stateParam);
+      if (!oauthReqInfo) {
+        return new Response("Invalid or tampered state", { status: 400 });
       }
 
       const redirectUri = new URL("/callback", request.url).toString();
@@ -195,14 +197,14 @@ export const githubAuthHandler = {
 };
 
 /** Redirect the browser to GitHub, encoding the OAuth request into `state`. */
-function redirectToGithub(
+async function redirectToGithub(
   request: Request,
   env: Env,
   oauthReqInfo: unknown,
   extraHeaders: Record<string, string> = {},
-): Response {
+): Promise<Response> {
   const redirectUri = new URL("/callback", request.url).toString();
-  const state = btoa(JSON.stringify(oauthReqInfo));
+  const state = await signState(env.COOKIE_SECRET, oauthReqInfo);
   const location = buildGithubAuthorizeUrl({
     clientId: env.GITHUB_CLIENT_ID,
     redirectUri,

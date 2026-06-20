@@ -122,3 +122,25 @@ def test_fetch_image_url_size_cap():
             )
 
     asyncio.run(scenario())
+
+
+# ---- PR-review SSRF hardening -----------------------------------------------
+
+def test_is_public_ip_unmaps_ipv4_mapped_ipv6():
+    from ipixel_mcp.modes import gallery
+    # ::ffff:127.0.0.1 / ::ffff:192.168.x must be treated as private (SSRF bypass)
+    assert gallery._is_public_ip("::ffff:127.0.0.1") is False
+    assert gallery._is_public_ip("::ffff:192.168.1.1") is False
+    assert gallery._is_public_ip("::ffff:8.8.8.8") is True
+    assert gallery._is_public_ip("127.0.0.1") is False
+    assert gallery._is_public_ip("8.8.8.8") is True
+
+
+def test_guard_image_url_rejects_ipv4_mapped_loopback():
+    import pytest
+    from ipixel_mcp.modes import gallery
+    from ipixel_mcp.safety import ValidationError
+    with pytest.raises(ValidationError):
+        gallery.guard_image_url(
+            "https://evil.example", resolver=lambda h: ["::ffff:127.0.0.1"]
+        )

@@ -52,7 +52,7 @@ def test_clear_by_source_only_targets_that_source(tmp_path):
     store = _store(tmp_path)
     asyncio.run(store.notify_operator(message="a", level="info", source="agent-1", ttl_seconds=100))
     asyncio.run(store.notify_operator(message="b", level="info", source="agent-2", ttl_seconds=100))
-    res = store.clear_notification(source="agent-1")
+    res = asyncio.run(store.clear_notification(source="agent-1"))
     assert res["cleared"] == 1
     remaining = store.list_notifications()["notifications"]
     assert len(remaining) == 1 and remaining[0]["source"] == "agent-2"
@@ -61,8 +61,8 @@ def test_clear_by_source_only_targets_that_source(tmp_path):
 def test_clear_all_and_unknown_id(tmp_path):
     store = _store(tmp_path)
     asyncio.run(store.notify_operator(message="a", level="info", source="x", ttl_seconds=100))
-    assert store.clear_notification("does-not-exist")["cleared"] == 0  # no-op
-    assert store.clear_notification()["cleared"] == 1                   # clear all
+    assert asyncio.run(store.clear_notification("does-not-exist"))["cleared"] == 0  # no-op
+    assert asyncio.run(store.clear_notification())["cleared"] == 1                   # clear all
 
 
 def test_render_callback_invoked_on_notify(tmp_path):

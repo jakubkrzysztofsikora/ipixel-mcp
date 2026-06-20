@@ -116,6 +116,14 @@ def scope_for_tool_call(body: bytes) -> "tuple[Optional[str], Any]":
     return TOOL_SCOPES.get(name), msg.get("id")
 
 
+def _is_json_batch(body: bytes) -> bool:
+    """True if the body is a JSON-RPC batch (top-level array)."""
+    try:
+        return isinstance(json.loads(body), list)
+    except (ValueError, TypeError):
+        return False
+
+
 async def _buffer_body(receive) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -198,9 +206,16 @@ class BearerAuthMiddleware:
         # tools/call against the granted scopes BEFORE FastMCP dispatch (B-3).
         if scope.get("method") == "POST":
             body = await self._buffer_or_passthrough(scope, receive)
+            # Reject JSON-RPC batches: the spec dropped them in 2025-06-18 and a
+            # batch would smuggle a tools/call past the single-message scope gate
+            # below (PR review — close the bypass rather than fail-open elsewhere).
+            if _is_json_batch(body):
+                return await self._jsonrpc_error(send, None, -32600, "batch requests are not supported")
             required, req_id = scope_for_tool_call(body)
             if required is not None and required not in principal.scopes:
-                return await self._jsonrpc_forbidden(send, req_id, required)
+                return await self._jsonrpc_error(
+                    send, req_id, -32001, f"forbidden: missing scope {required}", status=403
+                )
             receive = _replay_receive(body, receive)
 
         token = _current_principal.set(principal)
@@ -213,16 +228,12 @@ class BearerAuthMiddleware:
         return await _buffer_body(receive)
 
     @staticmethod
-    async def _jsonrpc_forbidden(send, req_id, scope_name: str) -> None:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32001, "message": f"forbidden: missing scope {scope_name}"},
-        }
+    async def _jsonrpc_error(send, req_id, code: int, message: str, status: int = 400) -> None:
+        payload = {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
         body = json.dumps(payload).encode()
         await send({
             "type": "http.response.start",
-            "status": 403,
+            "status": status,
             "headers": [(b"content-type", b"application/json")],
         })
         await send({"type": "http.response.body", "body": body})
@@ -459,7 +470,7 @@ def build_mcp(
         source: Optional[str] = None,
     ) -> dict:
         require_scope(auth_mod.SCOPE_NOTIFY)
-        return notifications.clear_notification(notification_id, source=source)
+        return await notifications.clear_notification(notification_id, source=source)
 
     @mcp.tool(
         description="List active notifications (id, level, message, source, age).",

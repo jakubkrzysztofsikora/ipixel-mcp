@@ -55,7 +55,7 @@ def test_blocked_preempts_and_clear_restores(tmp_path):
             message="need input", source="agent-1", level="blocked", ttl_seconds=100
         )
         assert ds.get_display_state()["kind"] == KIND_NOTIFY
-        store.clear_notification(res["notification_id"])
+        await store.clear_notification(res["notification_id"])
         assert ds.get_display_state()["summary"] == "something"
 
     asyncio.run(scenario())
@@ -93,7 +93,7 @@ def test_ttl_auto_expiry(tmp_path):
 
 def test_clear_unknown_id_noop(tmp_path):
     store, _, _ = make_store(tmp_path)
-    res = store.clear_notification("does-not-exist")
+    res = asyncio.run(store.clear_notification("does-not-exist"))
     assert res["ok"] and res["cleared"] == 0
 
 
@@ -117,7 +117,7 @@ def test_persistence_survives_restart(tmp_path):
         # blocked notification re-preempts on load
         assert ds2.get_display_state()["kind"] == KIND_NOTIFY
         # clear-of-known-id works across the "restart"
-        s2.clear_notification(nid)
+        await s2.clear_notification(nid)
         assert s2.list_notifications()["notifications"] == []
 
     asyncio.run(scenario())

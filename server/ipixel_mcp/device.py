@@ -183,9 +183,9 @@ class DeviceManager:
         )
         self._mtu = int(mtu) if isinstance(mtu, int) else None
         if self._mtu is not None and self._mtu < EXPECTED_MTU:
-            logger.warning(
-                "negotiated MTU %s < expected %s; the library's 244-byte chunking "
-                "would corrupt transfers — image ops will be refused on this link",
+            logger.info(
+                "negotiated MTU %s < %s; the patched pypixelcolor chunks by the "
+                "negotiated MTU, so transfers will be slower but NOT refused",
                 self._mtu,
                 EXPECTED_MTU,
             )
