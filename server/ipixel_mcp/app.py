@@ -63,9 +63,17 @@ TOOL_SCOPES: dict[str, str] = {
     "display_text": auth_mod.SCOPE_DISPLAY,
     "display_image": auth_mod.SCOPE_DISPLAY,
     "display_image_url": auth_mod.SCOPE_DISPLAY,
+    "set_brightness": auth_mod.SCOPE_DISPLAY,
+    "set_power": auth_mod.SCOPE_DISPLAY,
+    "set_orientation": auth_mod.SCOPE_DISPLAY,
+    "set_clock_mode": auth_mod.SCOPE_DISPLAY,
+    "show_slot": auth_mod.SCOPE_DISPLAY,
     "get_job_status": auth_mod.SCOPE_DISPLAY,
     "get_device_info": auth_mod.SCOPE_DISPLAY,
     "get_display_state": auth_mod.SCOPE_DISPLAY,
+    # Destructive Mode-A ops require the admin scope (review M-ANNOT).
+    "clear_screen": auth_mod.SCOPE_ADMIN,
+    "delete_slot": auth_mod.SCOPE_ADMIN,
     "notify_operator": auth_mod.SCOPE_NOTIFY,
     "clear_notification": auth_mod.SCOPE_NOTIFY,
     "list_notifications": auth_mod.SCOPE_NOTIFY,
@@ -121,7 +129,16 @@ async def _buffer_body(receive) -> bytes:
     return b"".join(chunks)
 
 
-def _replay_receive(body: bytes):
+def _replay_receive(body: bytes, original_receive=None):
+    """Replay the buffered body once, then delegate to ``original_receive``.
+
+    The downstream streamable-HTTP SSE handler watches ``receive`` for a real
+    ``http.disconnect`` to know when the client went away. Fabricating a
+    ``http.disconnect`` immediately after the body (the old behaviour) made the
+    SSE handler tear the response down before it finished writing — every POST
+    /mcp response was truncated/never-completed. Delegating to the original
+    receive lets a genuine disconnect propagate while keeping the stream alive.
+    """
     sent = False
 
     async def receive():
@@ -129,7 +146,13 @@ def _replay_receive(body: bytes):
         if not sent:
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
-        return {"type": "http.disconnect"}
+        if original_receive is not None:
+            return await original_receive()
+        # No original receive available (unit-test path): block until cancelled
+        # rather than fabricating an early disconnect.
+        import asyncio as _asyncio
+
+        await _asyncio.Event().wait()
 
     return receive
 
@@ -178,7 +201,7 @@ class BearerAuthMiddleware:
             required, req_id = scope_for_tool_call(body)
             if required is not None and required not in principal.scopes:
                 return await self._jsonrpc_forbidden(send, req_id, required)
-            receive = _replay_receive(body)
+            receive = _replay_receive(body, receive)
 
         token = _current_principal.set(principal)
         try:
@@ -287,6 +310,7 @@ def build_mcp(
         image_base64: str,
         format: Literal["png", "gif", "jpeg"],
         slot: int = display.DEFAULT_SLOT,
+        resize: Literal["crop", "fit"] = "crop",
         source: str = "display",
     ) -> dict:
         import base64
@@ -296,7 +320,7 @@ def build_mcp(
         except Exception:  # noqa: BLE001
             raise ValidationError("image_base64 is not valid base64")
         return display.display_image(
-            dm, jobs, data=data, fmt=format, slot=slot,
+            dm, jobs, data=data, fmt=format, slot=slot, resize=resize,
             source=source, display_state=display_state,
         )
 
@@ -311,13 +335,14 @@ def build_mcp(
         image_url: str,
         format: Literal["png", "gif", "jpeg"],
         slot: int = display.DEFAULT_SLOT,
+        resize: Literal["crop", "fit"] = "crop",
         source: str = "display",
     ) -> dict:
         from .modes import gallery as gallery_mod
         require_scope(auth_mod.SCOPE_DISPLAY)
         decoded = await gallery_mod.fetch_image_url(image_url, format)
         return display.display_image(
-            dm, jobs, data=decoded.payload.data, fmt=format, slot=slot,
+            dm, jobs, data=decoded.payload.data, fmt=format, slot=slot, resize=resize,
             source=source, display_state=display_state,
         )
 
@@ -344,6 +369,60 @@ def build_mcp(
     @_guard
     async def get_display_state() -> dict:  # noqa: ANN001
         return display.get_display_state(display_state)
+
+    # -- Mode A: device controls ---------------------------------------------
+
+    @mcp.tool(description="Set the panel brightness (0-100).")
+    @_guard
+    async def set_brightness(level: int) -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_DISPLAY)
+        return await display.set_brightness(dm, level)
+
+    @mcp.tool(description="Turn the panel on or off.")
+    @_guard
+    async def set_power(on: bool) -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_DISPLAY)
+        return await display.set_power(dm, on)
+
+    @mcp.tool(description="Set the panel orientation (0=0°, 1=90°, 2=180°, 3=270°).")
+    @_guard
+    async def set_orientation(orientation: int) -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_DISPLAY)
+        return await display.set_orientation(dm, orientation)
+
+    @mcp.tool(description="Switch the panel to clock mode.")
+    @_guard
+    async def set_clock_mode(  # noqa: ANN001
+        style: int = 1, show_date: bool = True, format_24: bool = True
+    ) -> dict:
+        require_scope(auth_mod.SCOPE_DISPLAY)
+        return await display.set_clock_mode(
+            dm, style=style, show_date=show_date, format_24=format_24
+        )
+
+    @mcp.tool(description="Show a previously saved screen slot (0-20).")
+    @_guard
+    async def show_slot(number: int) -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_DISPLAY)
+        return await display.show_slot(dm, number)
+
+    @mcp.tool(
+        description="DESTRUCTIVE: wipe the device's saved ROM/settings. Requires admin.",
+        annotations={"destructiveHint": True},
+    )
+    @_guard
+    async def clear_screen() -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_ADMIN)
+        return await display.clear_screen(dm)
+
+    @mcp.tool(
+        description="DESTRUCTIVE: delete a saved screen slot (0-20). Requires admin.",
+        annotations={"destructiveHint": True},
+    )
+    @_guard
+    async def delete_slot(n: int) -> dict:  # noqa: ANN001
+        require_scope(auth_mod.SCOPE_ADMIN)
+        return await display.delete_slot(dm, n)
 
     # -- Mode B: notify -------------------------------------------------------
 

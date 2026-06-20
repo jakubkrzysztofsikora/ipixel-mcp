@@ -105,7 +105,16 @@ def download_emoji(char: str) -> Optional[Image.Image]:
             logger.warning(f"Failed to load cached emoji {codepoint}: {e}")
             # Remove corrupted cache file
             cache_path.unlink(missing_ok=True)
-    
+
+    # SECURITY (review F-12): network emoji fetching is OPT-IN and OFF by default.
+    # An always-on, network-exposed server should not make an outbound CDN request
+    # mid-render on attacker-influenced text. Set IPIXEL_EMOJI_ONLINE=1 to enable
+    # (e.g. on a trusted desktop); otherwise emojis render blank / are skipped.
+    import os as _os
+    if _os.environ.get("IPIXEL_EMOJI_ONLINE", "").lower() not in ("1", "true", "yes", "on"):
+        logger.debug("Emoji network fetch disabled (set IPIXEL_EMOJI_ONLINE=1 to enable)")
+        return None
+
     # Download from Twemoji CDN
     url = f"{TWEMOJI_BASE_URL}{codepoint}.png"
     logger.debug(f"Downloading emoji from: {url}")

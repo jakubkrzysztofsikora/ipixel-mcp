@@ -217,7 +217,7 @@ params). ASCII art is rendered via the monospace bundled font (or pre-rasterized
 | Document BLE Just-Works trust; keep device host physically/network trusted | F-10 |
 | Context-managed `Image.open`; close handles (long-running server) | F-11 |
 | **Disable** network emoji fetch (offline/opt-in); bundle any needed glyphs | F-12 |
-| Rate limiting + request-size limits at Worker **and** origin | F-1, F-3, DoS |
+| Request-size limits at Worker + origin (image byte caps **done**); **rate limiting deferred to Phase 5** (Cloudflare edge WAF rate-limit available in the meantime) | F-1, F-3, DoS |
 | `clear`/`delete` gated behind admin scope + confirm token | F-1 |
 
 **Upstream contribution:** file issues/PRs to `pypixelcolor` for F-1 (auth + loopback

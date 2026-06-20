@@ -104,6 +104,18 @@ describe("buildClientResponse", () => {
     // hop-by-hop / leaky headers dropped
     expect(res.headers.get("set-cookie")).toBeNull();
   });
+
+  it("does not forward www-authenticate (E-1/MED-3: Worker owns auth challenges)", () => {
+    const upstream = new Response("nope", {
+      status: 401,
+      headers: {
+        "content-type": "application/json",
+        "www-authenticate": 'Bearer resource_metadata="https://evil/x"',
+      },
+    });
+    const res = buildClientResponse(upstream);
+    expect(res.headers.get("www-authenticate")).toBeNull();
+  });
 });
 
 describe("mcpProxyHandler.fetch", () => {

@@ -10,9 +10,8 @@ See [`../docs/PLAN.md`](../docs/PLAN.md) (v2) and
 - `ipixel_mcp/device.py` — **disposable-link** BLE manager: single-flight lock,
   per-op `asyncio.wait_for` timeouts, retry-once-on-disconnect, reconnect
   supervisor + circuit breaker, MTU check, `health()`. (Phase 0)
-- `ipixel_mcp/ble_backend.py` — thin adapter over `pypixelcolor.AsyncClient`
-  (lazy import) exposing only connect/disconnect/get_device_info/send_text/
-  send_image_hex (bytes-only, never a filesystem path — F-2).
+- `device.py` calls the patched `pypixelcolor.AsyncClient` directly (lazy import);
+  tools only ever pass validated bytes / scalars (never a filesystem path — F-2).
 - **`../vendor/pypixelcolor/`** — a **security-patched fork** of the upstream
   library (see its `SECURITY-PATCHES.md`). The real bug fixes now live *in the
   library*: MTU-aware chunking (H-MTU), `set_pixel` validation (F-5),

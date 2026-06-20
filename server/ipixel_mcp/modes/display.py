@@ -72,10 +72,16 @@ def _dims(device_info: Any) -> tuple[int, int]:
 
 async def display_text(dm: DeviceManager, **params: Any) -> dict[str, Any]:
     """Render text on the board. Returns a short text confirmation (review M-RESULT)."""
+    # Warm the connection so animation gating uses the LIVE panel dimensions, then
+    # validate BEFORE dm.execute (review G-4): a ValidationError raised inside the
+    # _op would otherwise be re-wrapped by DeviceManager.execute as a generic
+    # DeviceError and the model would never learn which parameter was wrong. If the
+    # link can't be established, _dims falls back to a non-32x32 size (fail-closed).
+    await dm.ensure_ready()
+    width, height = _dims(dm.device_info)
+    kwargs = build_send_text_kwargs(width=width, height=height, **params)
 
     async def _op(client: Any) -> None:
-        width, height = _dims(dm.device_info)
-        kwargs = build_send_text_kwargs(width=width, height=height, **params)
         await client.send_text(**kwargs)
 
     await dm.execute("display_text", _op)
@@ -85,6 +91,67 @@ async def display_text(dm: DeviceManager, **params: Any) -> dict[str, Any]:
         "message": f"Displayed text on board (slot {slot}, "
         f"{'volatile' if slot == 0 else 'saved'}).",
     }
+
+
+# ---- Mode A device-control tools (plan §3 Mode A) ---------------------------
+
+
+async def _call(dm: DeviceManager, op_name: str, method: str, *args: Any) -> None:
+    async def _op(client: Any) -> None:
+        await getattr(client, method)(*args)
+
+    await dm.execute(op_name, _op)
+
+
+async def set_brightness(dm: DeviceManager, level: int) -> dict[str, Any]:
+    lvl = safety.clamp_int(level, field="level", lo=0, hi=100)
+    await _call(dm, "set_brightness", "set_brightness", lvl)
+    return {"ok": True, "message": f"Brightness set to {lvl}."}
+
+
+async def set_power(dm: DeviceManager, on: bool) -> dict[str, Any]:
+    state = bool(on)
+    await _call(dm, "set_power", "set_power", state)
+    return {"ok": True, "message": f"Power {'on' if state else 'off'}."}
+
+
+async def set_orientation(dm: DeviceManager, orientation: int) -> dict[str, Any]:
+    o = safety.clamp_int(orientation, field="orientation", lo=0, hi=3)
+    await _call(dm, "set_orientation", "set_orientation", o)
+    return {"ok": True, "message": f"Orientation set to {o}."}
+
+
+async def show_slot(dm: DeviceManager, number: int) -> dict[str, Any]:
+    n = safety.clamp_int(number, field="number", lo=0, hi=20)
+    await _call(dm, "show_slot", "show_slot", n)
+    return {"ok": True, "message": f"Showing slot {n}."}
+
+
+async def set_clock_mode(
+    dm: DeviceManager, style: int = 1, show_date: bool = True, format_24: bool = True
+) -> dict[str, Any]:
+    s = safety.clamp_int(style, field="style", lo=0, hi=255)
+
+    async def _op(client: Any) -> None:
+        await client.set_clock_mode(
+            style=s, show_date=bool(show_date), format_24=bool(format_24)
+        )
+
+    await dm.execute("set_clock_mode", _op)
+    return {"ok": True, "message": f"Clock mode {s} set."}
+
+
+async def clear_screen(dm: DeviceManager) -> dict[str, Any]:
+    """Destructive: wipes device ROM/settings (admin-gated at the app layer)."""
+    await _call(dm, "clear", "clear")
+    return {"ok": True, "message": "Cleared device ROM."}
+
+
+async def delete_slot(dm: DeviceManager, n: int) -> dict[str, Any]:
+    """Destructive: delete a saved screen (admin-gated at the app layer)."""
+    idx = safety.clamp_int(n, field="n", lo=0, hi=20)
+    await _call(dm, "delete", "delete", idx)
+    return {"ok": True, "message": f"Deleted slot {idx}."}
 
 
 async def get_device_info(dm: DeviceManager) -> dict[str, Any]:
@@ -110,6 +177,7 @@ def display_image(
     data: bytes,
     fmt: str,
     slot: int = DEFAULT_SLOT,
+    resize: str = "crop",
     source: str = "display",
     display_state: Optional[DisplayState] = None,
     frame_sizer: "safety.FrameSizer" = safety._pillow_frame_sizer,
@@ -121,6 +189,7 @@ def display_image(
     transfer happens in the background and its outcome is read via job status.
     """
     slot = safety.clamp_int(slot, field="slot", lo=0, hi=20)
+    resize = safety.validate_resize(resize)
     # Synchronous hardening so a bad image fails the tool call, not silently a job.
     decoded = safety.decode_and_prepare_image(data, fmt, frame_sizer=frame_sizer)
 
@@ -134,6 +203,7 @@ def display_image(
             await client.send_image_hex(
                 hex_string=hex_string,
                 file_extension=decoded.payload.extension,
+                resize_method=resize,
                 save_slot=slot,
             )
 

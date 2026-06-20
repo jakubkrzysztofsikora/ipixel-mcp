@@ -146,3 +146,20 @@ def test_open_guard_rejects_too_many_frames(monkeypatch):
     f1.save(buf, format="GIF", save_all=True, append_images=[f2])
     with pytest.raises(ValueError):
         send_image._open_image_guarded(buf.getvalue())
+
+
+# ---- F-12: emoji network fetch is opt-in / OFF by default -------------------
+
+def test_emoji_fetch_disabled_by_default(monkeypatch):
+    from pypixelcolor.lib import emoji_manager
+
+    monkeypatch.delenv("IPIXEL_EMOJI_ONLINE", raising=False)
+    # Force a cache miss so the only way to get an image is the network path.
+    monkeypatch.setattr(emoji_manager, "CACHE_DIR", emoji_manager.Path("/nonexistent-emoji-cache"))
+
+    import urllib.request
+    def _boom(*a, **k):
+        raise AssertionError("network fetch must not happen when disabled")
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+
+    assert emoji_manager.download_emoji("\U0001F600") is None  # never hits the network

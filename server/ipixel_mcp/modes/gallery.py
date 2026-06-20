@@ -140,7 +140,10 @@ class Gallery:
                     "uri": f"gallery://presets/{p.id}",
                     "name": p.name,
                     "description": f"{p.category} preset '{p.name}'",
-                    "mimeType": "text/plain" if p.category != "image" else "image/png",
+                    # Image presets expose JSON *metadata* via read_resource (the
+                    # actual pixels are rendered by show_preset), so the mime must
+                    # reflect what's returned, not image/png (review NIT-2).
+                    "mimeType": "application/json" if p.category == "image" else "text/plain",
                 }
             )
         return out

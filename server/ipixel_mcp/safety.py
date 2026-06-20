@@ -43,7 +43,8 @@ MAX_ENCODED_OUTPUT_BYTES = 256 * 1024
 # F-2: only fonts bundled with pypixelcolor; never an arbitrary path.
 ALLOWED_FONTS = frozenset({"CUSONG", "SIMSUN", "VCR_OSD_MONO"})
 
-ALLOWED_RESIZE = frozenset({"crop", "fit", "stretch"})
+# Only what pypixelcolor's ResizeMethod actually supports (crop/fit).
+ALLOWED_RESIZE = frozenset({"crop", "fit"})
 
 _HEX_COLOR = re.compile(r"^#?([0-9a-fA-F]{6})$")
 

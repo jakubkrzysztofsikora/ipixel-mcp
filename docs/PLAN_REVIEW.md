@@ -343,3 +343,43 @@ index, so stale-within-transfer ACKs can't be fully ruled out — strict-frame v
 is the available mitigation); F-2 path API and F-12 emoji fetch (mitigated at the
 wrapper, not altered upstream); per-chunk `response=True` throughput. These are flagged
 for the upstream PRs.
+
+---
+
+# Round 4 — implementation verified against the plan (and run)
+
+Three adversarial verifiers checked implementation-vs-plan **by executing it** (the
+integration seam was finally runnable once `mcp` could be installed). Results:
+
+- **Worker:** `tsc` clean, **26 vitest pass**, `wrangler deploy --dry-run` builds the
+  bundle (87.9 KiB). C-1/C-4(a–d)/E-1/TOP-1/M-REDIRECT/GitHub-gate all verified against
+  code **and** tests; no user-token-to-origin leak path found.
+- **Server:** real `build_app` driven over HTTP with the **lifespan running** and a fake
+  BLE backend — B-2 (no "Task group not initialized"), B-3 (scope gate fail-closed →
+  403), B-4 (notify paints the board), C-2 (job_id), E-1 (plain 401, no
+  `WWW-Authenticate`), `/healthz` — all PASS. Adversarial probes (bad colour, `..`/path
+  font, oversized image, 300-char text, pixel bomb) all rejected with generic errors.
+
+## Bugs the verification found — and fixed this round
+
+| ID | Issue | Fix |
+|----|-------|-----|
+| **G-2** | `BearerAuthMiddleware._replay_receive` fabricated an early `http.disconnect`, **truncating every authenticated `/mcp` streaming response** in production (the unit suite's fake double never modeled a long-lived stream, so it was invisible) | replay the body once, then **delegate to the real `receive`**; added `test_integration_app.py` that drives the real stack |
+| **G-1** | fork `pyproject` version was `0.4.0` while everything pinned `0.4.0+ipixel1` → `pip install -e server` failed | bumped fork `pyproject` to `0.4.0+ipixel1` (verified the pin now resolves) |
+| **Plan §3 gap** | 7 Mode-A tools were in the plan but unimplemented; the admin-scope gating gated nothing | implemented `set_brightness/set_power/set_orientation/set_clock_mode/show_slot` (display scope) and `clear_screen/delete_slot` (**admin** scope, `destructiveHint`) — the `ipixel:admin` machinery is now live |
+| **G-4** | `display_text` validation ran *inside* `dm.execute`, so a bad colour/font came back as a generic `DeviceError` (model couldn't self-correct) | validate **before** execute; `ensure_ready()` first so animation gating uses live panel dims |
+| **G-5 / F-12** | the "emoji fetch mitigated" claim had no enforcing code — an emoji in `display_text` still hit the CDN mid-BLE-op | fork `download_emoji` is now **opt-in** (`IPIXEL_EMOJI_ONLINE`, off by default → returns None) |
+| **resize** | `display_image` `resize` arg in the plan was unimplemented; `validate_resize` was dead | threaded `resize` through to `send_image_hex`; aligned `ALLOWED_RESIZE` to what the lib supports (`crop`/`fit`) |
+| **dead code** | `ble_backend.py` was unused but README implied it was the active MTU adapter | removed `ble_backend.py` + its test; README now describes `device.py`'s direct use of the patched `AsyncClient` |
+| **NIT-2** | image gallery resources advertised `image/png` but returned JSON | mime set to `application/json` for image presets (they expose metadata; pixels come from `show_preset`) |
+
+Test totals after this round: **server 121 + 1 skipped** (integration test skips unless
+`mcp`/`httpx` installed) **+ 9 integration when deps present**; **fork 13**; **worker 26**.
+
+## Residuals (unchanged, accepted)
+F-8 sequence correlation (no window index in the wire protocol); per-chunk `response=True`
+throughput; T-1 notify-preempt-is-not-cancellation; **rate limiting deferred to Phase 5**
+(edge WAF available now); **G-3** forward-compat: `build_app` requires the pinned
+`mcp==1.12`/`pydantic<2.12` (newer FastMCP rebuilds the `_guard` signature and trips on
+`Optional[...]`) — the `constraints.txt` pin is authoritative; per-artifact hash-lock (F-7)
+remains a CI task.
