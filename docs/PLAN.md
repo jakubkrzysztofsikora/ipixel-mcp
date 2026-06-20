@@ -320,6 +320,12 @@ ipixel-mcp/
   supervisor, per-op `asyncio.wait_for` timeouts, dynamic MTU, and `/healthz`**. Resolve
   bind-order (always bind loopback; tailnet bind lazily) and single-vs-multi-board.
   *Exit:* **survives a BLE disconnect and recovers** (not merely "shows text").
+  ✅ **Scaffolded in [`../server/`](../server/)** — `device.py` (lock + per-op timeouts +
+  retry-once-on-disconnect + circuit breaker + MTU check + health), `safety.py`,
+  `auth.py`, `modes/display.py`, stateless FastMCP `app.py`; 32 hardware-free tests pass
+  (disconnect recovery, timeout-recycle, circuit breaker, lock serialization, validation).
+  Remaining for exit: real-hardware disconnect smoke test; MTU *enforcement* needs the
+  vendored/hardened `pypixelcolor` (Phase 1).
 - **Phase 1 — Safety hardening:** all `safety.py` limits (F-2/3/6/11); **flash-wear
   defaults (volatile `save_slot=0`)**; **model-specific enum gating** (animations 3/4
   bootloop non-32×32 boards); pinned transitive tree + hashes + `pip-audit`; generic
@@ -352,8 +358,10 @@ ipixel-mcp/
 3. **Destructive tools** (`clear`/`delete`): expose behind an admin scope, or omit
    entirely?
 4. **Custom domain** for the Worker, or use the `*.workers.dev` default?
-5. **Device host & board model** (matrix W×H, single or multiple boards → multi-device
-   routing in tools?).
+5. ~~Single or multiple boards?~~ **DECIDED: single board.** The origin manages exactly
+   one `DeviceSession`; no multi-device routing in tools. (Still need the specific board
+   model / matrix W×H to set per-model enum gating — discovered at runtime via
+   `get_device_info`, but confirm the model for asset sizing.)
 6. Do you want me to also **upstream the `pypixelcolor` fixes** (F-1/F-5/F-6/F-3) as
    PRs, or only vendor a local hardened wrapper?
 
