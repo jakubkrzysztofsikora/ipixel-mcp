@@ -9,6 +9,8 @@ Env:
   IPIXEL_HOST                 bind host (default 127.0.0.1)
   IPIXEL_PORT                 bind port (default 8765)
   IPIXEL_LOGLEVEL             default INFO
+  IPIXEL_ACCESS_TEAM          Cloudflare Access team domain (enables Worker path)
+  IPIXEL_ACCESS_AUD           Cloudflare Access application AUD tag
 """
 
 from __future__ import annotations
@@ -44,11 +46,22 @@ def main() -> int:
         return 1
 
     from .app import build_app
+    from .auth import make_access_jwt_verifier
     from .device import DeviceManager
 
     dm = DeviceManager(address)
+
+    # Optional Cloudflare Access JWT verifier (the Worker path). When the team +
+    # AUD are configured, the origin verifies the Worker's service-token JWT.
+    verifier = None
+    team = os.environ.get("IPIXEL_ACCESS_TEAM")
+    aud = os.environ.get("IPIXEL_ACCESS_AUD")
+    if team and aud:
+        verifier = make_access_jwt_verifier(team, aud)
+        log.info("Cloudflare Access JWT verification enabled (team=%s)", team)
+
     # The supervisor starts inside the running loop via a startup hook.
-    app = build_app(dm, static_token=static_token)
+    app = build_app(dm, static_token=static_token, access_jwt_verifier=verifier)
 
     log.info("ipixel-mcp origin starting on http://%s:%d (board=%s)", host, port, address)
     uvicorn.run(app, host=host, port=port, log_level="info")

@@ -20,6 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# auth.py ships a pure-Python RS256 verifier, so these are optional; install to
+# inject a vetted crypto implementation as the rsa_verifier.
+crypto = [
+    "PyJWT>=2.8,<3",
+    "cryptography>=42,<44",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",

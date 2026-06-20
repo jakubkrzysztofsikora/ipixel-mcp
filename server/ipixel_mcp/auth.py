@@ -15,9 +15,16 @@ Stdlib-only; the Access-JWT verifier is injected so this is testable offline.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
+import json
+import logging
+import time
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
+
+logger = logging.getLogger("ipixel_mcp.auth")
 
 # Scope names used to gate tools. Admin gates destructive ops (clear/delete).
 SCOPE_DISPLAY = "ipixel:display"
@@ -95,3 +102,187 @@ def authorize(
         return Principal(kind="static", scopes=STATIC_BEARER_SCOPES)
 
     raise Unauthorized("no trusted credential presented")
+
+
+# =============================================================================
+# Cloudflare Access service-token JWT verification (review C-4 / §5)
+# =============================================================================
+#
+# The origin authenticates *the Worker* via the Cloudflare Access service-token
+# JWT (header ``Cf-Access-Jwt-Assertion``). We verify:
+#   - RS256 signature against the team's JWKS (kid-matched),
+#   - ``aud`` contains the configured Access application AUD tag,
+#   - ``iss`` equals ``https://<team>.cloudflareaccess.com``,
+#   - ``exp`` (and ``nbf``/``iat`` if present) within a small clock skew.
+#
+# JWKS fetching and the RSA verify primitive are both injectable so a unit test
+# can verify a self-signed token offline and without PyJWT. A pure-Python RS256
+# verifier is included as the default crypto so tests need no third-party libs.
+
+# (jwt_str) -> bool. This is the public verifier shape used by ``authorize``.
+# (already defined above as AccessJwtVerifier)
+
+# A JWKS fetcher returns the parsed JWKS dict ({"keys": [...]}). Injected so
+# tests pass a static key set with no network. The default fetches over HTTPS.
+JwksFetcher = Callable[[], Mapping[str, Any]]
+
+# An RSA verify primitive: (message_bytes, signature_bytes, jwk_dict) -> bool.
+# Injected so tests can use a tiny verifier (or the pure default) without PyJWT.
+RsaVerifier = Callable[[bytes, bytes, Mapping[str, Any]], bool]
+
+_DEFAULT_LEEWAY = 60.0  # seconds of clock skew tolerance
+
+
+def _b64url_decode(segment: str) -> bytes:
+    pad = "=" * (-len(segment) % 4)
+    return base64.urlsafe_b64decode(segment + pad)
+
+
+def _b64url_uint(value: str) -> int:
+    return int.from_bytes(_b64url_decode(value), "big")
+
+
+def pure_rs256_verify(message: bytes, signature: bytes, jwk: Mapping[str, Any]) -> bool:
+    """Pure-Python RS256 (RSASSA-PKCS1-v1_5 + SHA-256) verify, stdlib only.
+
+    Used as the default crypto so tests (and a PyJWT-less deployment) can verify
+    without third-party packages. Reconstructs the EMSA-PKCS1-v1_5 encoding and
+    compares against ``signature ** e mod n``.
+    """
+    try:
+        n = _b64url_uint(jwk["n"])
+        e = _b64url_uint(jwk["e"])
+    except (KeyError, ValueError):
+        return False
+    if not signature:
+        return False
+
+    k = (n.bit_length() + 7) // 8
+    if len(signature) != k:
+        return False
+    sig_int = int.from_bytes(signature, "big")
+    if sig_int >= n:
+        return False
+    # RSAVP1: m = s^e mod n
+    m_int = pow(sig_int, e, n)
+    em = m_int.to_bytes(k, "big")
+
+    # EMSA-PKCS1-v1_5 for SHA-256:
+    #   0x00 0x01 PS(0xFF...) 0x00 DigestInfo
+    digest = hashlib.sha256(message).digest()
+    # DER DigestInfo prefix for SHA-256.
+    di_prefix = bytes.fromhex("3031300d060960864801650304020105000420")
+    t = di_prefix + digest
+    ps_len = k - len(t) - 3
+    if ps_len < 8:
+        return False
+    expected = b"\x00\x01" + b"\xff" * ps_len + b"\x00" + t
+    return hmac.compare_digest(em, expected)
+
+
+def _select_jwk(jwks: Mapping[str, Any], kid: Optional[str]) -> Optional[Mapping[str, Any]]:
+    keys = jwks.get("keys") or []
+    if kid is not None:
+        for k in keys:
+            if k.get("kid") == kid:
+                return k
+        return None
+    # No kid in the header: only safe if exactly one key is published.
+    return keys[0] if len(keys) == 1 else None
+
+
+def _https_jwks_fetcher(team_domain: str) -> JwksFetcher:
+    """Default JWKS fetcher over HTTPS (lazy import; not used by tests)."""
+    url = f"https://{team_domain}/cdn-cgi/access/certs"
+
+    def _fetch() -> Mapping[str, Any]:
+        import urllib.request  # lazy
+
+        with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 - fixed https URL
+            return json.loads(resp.read().decode("utf-8"))
+
+    return _fetch
+
+
+def make_access_jwt_verifier(
+    team_domain: str,
+    aud: str,
+    *,
+    jwks_fetcher: Optional[JwksFetcher] = None,
+    rsa_verifier: RsaVerifier = pure_rs256_verify,
+    clock: Callable[[], float] = time.time,
+    leeway: float = _DEFAULT_LEEWAY,
+    jwks_cache_ttl: float = 600.0,
+) -> AccessJwtVerifier:
+    """Build a verifier callable for Cloudflare Access service-token JWTs.
+
+    Validates the RS256 signature (against the team JWKS), ``aud``, ``iss`` and
+    ``exp``/``nbf``. ``jwks_fetcher`` and ``rsa_verifier`` are injectable so a
+    test can verify a self-generated key offline without PyJWT/network.
+
+    ``team_domain`` is e.g. ``myteam.cloudflareaccess.com``; ``aud`` is the
+    Access application's AUD tag.
+    """
+    issuer = f"https://{team_domain}"
+    if jwks_fetcher is None:
+        jwks_fetcher = _https_jwks_fetcher(team_domain)
+
+    cache: dict[str, Any] = {"jwks": None, "at": 0.0}
+
+    def _get_jwks(force: bool = False) -> Mapping[str, Any]:
+        now = clock()
+        if force or cache["jwks"] is None or (now - cache["at"]) > jwks_cache_ttl:
+            try:
+                cache["jwks"] = jwks_fetcher()
+                cache["at"] = now
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("JWKS fetch failed: %r", exc)
+                if cache["jwks"] is None:
+                    raise
+        return cache["jwks"]
+
+    def verify(token: str) -> bool:
+        try:
+            header_b64, payload_b64, sig_b64 = token.split(".")
+            header = json.loads(_b64url_decode(header_b64))
+            payload = json.loads(_b64url_decode(payload_b64))
+            signature = _b64url_decode(sig_b64)
+        except (ValueError, json.JSONDecodeError):
+            return False
+
+        if header.get("alg") != "RS256":
+            return False  # only RS256; never accept "none" or HS* downgrade
+        kid = header.get("kid")
+
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+
+        # Try the cached JWKS; on a kid miss, refresh once (key rotation).
+        jwk = _select_jwk(_get_jwks(), kid)
+        if jwk is None:
+            jwk = _select_jwk(_get_jwks(force=True), kid)
+        if jwk is None:
+            return False
+        try:
+            if not rsa_verifier(signing_input, signature, jwk):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("RSA verify error: %r", exc)
+            return False
+
+        # Claims.
+        if payload.get("iss") != issuer:
+            return False
+        token_aud = payload.get("aud")
+        auds = token_aud if isinstance(token_aud, list) else [token_aud]
+        if aud not in auds:
+            return False
+        now = clock()
+        exp = payload.get("exp")
+        if not isinstance(exp, (int, float)) or now > exp + leeway:
+            return False
+        nbf = payload.get("nbf")
+        if isinstance(nbf, (int, float)) and now < nbf - leeway:
+            return False
+        return True
+
+    return verify

@@ -1,0 +1,62 @@
+{
+  // ipixel-mcp public Worker (Phase 4).
+  // OAuth 2.1 Authorization Server + Resource Server for claude.ai / Desktop,
+  // plus an authenticating request/response proxy to the tailnet origin.
+  //
+  // NOTE: this is a PLAIN auth proxy (review C-1). The MCP server itself is
+  // Python on the device. We do NOT use the `agents` SDK and there is NO
+  // Durable Object binding here.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ipixel-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  // ---------------------------------------------------------------------------
+  // KV: token / grant / client storage for @cloudflare/workers-oauth-provider.
+  // The provider hashes tokens before storing them here.
+  //   Create with:  wrangler kv namespace create OAUTH_KV
+  //   then paste the returned id below (and an id for `preview_id` for `wrangler dev`).
+  // The binding MUST be named OAUTH_KV (the provider's default expectation).
+  // ---------------------------------------------------------------------------
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID",
+      "preview_id": "REPLACE_WITH_KV_PREVIEW_ID"
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Non-secret vars. Override per-environment as needed.
+  //   ORIGIN_URL          base URL of the cloudflared Tunnel hostname that
+  //                       fronts the tailnet origin, e.g.
+  //                       "https://ipixel-origin.example.com". The proxy
+  //                       appends "/mcp". This host is protected by Cloudflare
+  //                       Access (service-token policy).
+  //   ALLOWED_GITHUB_LOGIN  the single GitHub login permitted to operate the
+  //                       board (e.g. "octocat"). Everyone else is rejected.
+  // ---------------------------------------------------------------------------
+  "vars": {
+    "ORIGIN_URL": "https://REPLACE_ME.example.com",
+    "ALLOWED_GITHUB_LOGIN": "REPLACE_WITH_GITHUB_LOGIN"
+  }
+
+  // ---------------------------------------------------------------------------
+  // Secrets (DO NOT put these in vars / commit them). Set with `wrangler secret put`:
+  //   CF_ACCESS_CLIENT_ID      Cloudflare Access service token client id
+  //                            (sent to the origin as CF-Access-Client-Id).
+  //   CF_ACCESS_CLIENT_SECRET  Cloudflare Access service token secret
+  //                            (sent to the origin as CF-Access-Client-Secret).
+  //   GITHUB_CLIENT_ID         GitHub OAuth App client id (operator login).
+  //   GITHUB_CLIENT_SECRET     GitHub OAuth App client secret.
+  //   COOKIE_SECRET            random 32+ byte secret used to sign the
+  //                            "approved client" cookie (HMAC). Generate with
+  //                            `openssl rand -hex 32`.
+  // See worker/README.md for the full deploy runbook.
+  // ---------------------------------------------------------------------------
+}

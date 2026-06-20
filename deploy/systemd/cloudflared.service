@@ -1,0 +1,51 @@
+# cloudflared as a systemd service.
+#
+# PREFERRED: use the unit cloudflared installs for you. After authenticating and
+# creating the tunnel (see deploy/runbook.md), run:
+#
+#     sudo cloudflared service install
+#
+# That generates /etc/systemd/system/cloudflared.service pointing at
+# /etc/cloudflared/config.yml and enables it. This file documents an equivalent
+# explicit unit if you prefer to manage it by hand or pin the run flags.
+#
+# Either way cloudflared is INDEPENDENT of the origin's bind: it dials OUT to
+# Cloudflare's edge and forwards inbound tunnel requests to http://127.0.0.1:8765.
+# It can start before OR after ipixel-mcp; it will retry the origin until it's up.
+
+[Unit]
+Description=cloudflared tunnel (Worker -> loopback origin bridge)
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+After=network-online.target
+Wants=network-online.target
+# Soft ordering: nice to have the origin up first so the first proxied request
+# succeeds, but cloudflared retries, so this is Wants (not Requires).
+Wants=ipixel-mcp.service
+After=ipixel-mcp.service
+# Restart rate-limit keys live in [Unit], not [Service].
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User=cloudflared
+Group=cloudflared
+# Tunnel credentials + config live under /etc/cloudflared (perms 0600 on the
+# credentials JSON). See deploy/cloudflared/config.yml and deploy/secrets.md.
+ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml --no-autoupdate tunnel run
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=0
+
+# Hardening (cloudflared needs outbound network only).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/cloudflared
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

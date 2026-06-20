@@ -1,8 +1,9 @@
-"""Mode A — display passthrough (Phase 0: text + device info).
+"""Mode A — display passthrough (text, image-as-job, device/display state).
 
 Pure validation/builders (no mcp import) so they are unit-testable, plus async
-handlers that run through the DeviceManager. Image display arrives in Phase 2 as
-an async job (review C-2); Phase 0 keeps the synchronous text path.
+handlers that run through the DeviceManager. ``display_image`` is an **async job**
+(review C-2): it validates + hardens the bytes synchronously, then returns a
+``job_id`` immediately while the (slow) BLE transfer runs in the background.
 """
 
 from __future__ import annotations
@@ -11,6 +12,9 @@ from typing import Any, Optional
 
 from .. import safety
 from ..device import DeviceManager
+from ..display_state import DisplayState
+from ..jobs import JobRegistry
+from ..logging_utils import redact_bytes
 
 # Defaults mirror pypixelcolor.send_text but with safe, model-agnostic values.
 DEFAULT_COLOR = "ffffff"
@@ -94,3 +98,62 @@ async def get_device_info(dm: DeviceManager) -> dict[str, Any]:
         "device_type": getattr(info, "device_type", None),
         "allowed_animations": sorted(safety.allowed_animations(width, height)),
     }
+
+
+# ---- image as async job (review C-2) ----------------------------------------
+
+
+def display_image(
+    dm: DeviceManager,
+    jobs: JobRegistry,
+    *,
+    data: bytes,
+    fmt: str,
+    slot: int = DEFAULT_SLOT,
+    source: str = "display",
+    display_state: Optional[DisplayState] = None,
+    frame_sizer: "safety.FrameSizer" = safety._pillow_frame_sizer,
+) -> dict[str, Any]:
+    """Validate + harden image bytes, then enqueue the slow transfer as a job.
+
+    Returns ``{job_id, status}`` immediately (review C-2). Validation errors are
+    raised synchronously (so the caller gets a real ValidationError); the BLE
+    transfer happens in the background and its outcome is read via job status.
+    """
+    slot = safety.clamp_int(slot, field="slot", lo=0, hi=20)
+    # Synchronous hardening so a bad image fails the tool call, not silently a job.
+    decoded = safety.decode_and_prepare_image(data, fmt, frame_sizer=frame_sizer)
+
+    async def _work() -> dict[str, Any]:
+        async def _op(client: Any) -> None:
+            hex_string = decoded.payload.data.hex()
+            # Final encoded-size guard before the (slow) transfer (C-2).
+            safety.enforce_encoded_output_size(decoded.payload.data)
+            await client.send_image_hex(
+                hex_string=hex_string,
+                file_extension=decoded.payload.extension,
+                save_slot=slot,
+            )
+
+        await dm.execute("display_image", _op, timeout=120.0)
+        if display_state is not None:
+            display_state.set_base(
+                owner=source,
+                summary=f"image {decoded.width}x{decoded.height} "
+                f"({redact_bytes(decoded.payload.data)})",
+            )
+        return {
+            "ok": True,
+            "slot": slot,
+            "frames": decoded.frame_count,
+            "message": f"Displayed image on board (slot {slot}, "
+            f"{'volatile' if slot == 0 else 'saved'}).",
+        }
+
+    job = jobs.submit("display_image", _work)
+    return {"job_id": job.id, "status": job.status}
+
+
+def get_display_state(display_state: DisplayState) -> dict[str, Any]:
+    """Read the current display ownership/state (review M-OWN, read-only)."""
+    return display_state.get_display_state()

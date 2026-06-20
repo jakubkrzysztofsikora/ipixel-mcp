@@ -1,0 +1,44 @@
+{
+  "//": "Mode B (notify.*) integration for Claude Code, using the NATIVE mcp_tool",
+  "//2": "handler type -- no shell, no curl (review E-2). The 'server' name must",
+  "//3": "match how you registered the origin: `claude mcp add ... ipixel ...`.",
+  "//4": "COPY the hooks block below into your project's .claude/settings.json",
+  "//5": "(or ~/.claude/settings.json). Notification fires when Claude Code wants",
+  "//6": "the operator (permission_prompt or idle_prompt) -> render a blocked",
+  "//7": "banner. Stop fires when the turn finishes -> clear it. ttl_seconds is",
+  "//8": "enforced server-side so a missed Stop hook can't strand the board on red.",
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "ipixel",
+            "tool": "notify_operator",
+            "input": {
+              "message": "operator input needed",
+              "level": "blocked",
+              "source": "claude-code",
+              "ttl_seconds": 300
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "ipixel",
+            "tool": "clear_notification",
+            "input": {
+              "source": "claude-code"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
