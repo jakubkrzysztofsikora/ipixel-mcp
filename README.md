@@ -17,8 +17,10 @@ served over a **Tailscale** tailnet, with a **Cloudflare Worker** terminating OA
 
 ## Documents
 
-- **[docs/PLAN.md](docs/PLAN.md)** — architecture, the three modes, OAuth/Tailscale/
+- **[docs/PLAN.md](docs/PLAN.md)** (v2) — architecture, the three modes, OAuth/Tailscale/
   Cloudflare design, security controls, and delivery phases.
+- **[docs/PLAN_REVIEW.md](docs/PLAN_REVIEW.md)** — three-persona adversarial review
+  (fullstack/devops, microcontroller/BLE, MCP/harness) that produced the v2 revisions.
 - **[docs/SECURITY_REVIEW_pypixelcolor.md](docs/SECURITY_REVIEW_pypixelcolor.md)** —
   Cyberlegion-style audit of `pypixelcolor`, which the plan's security controls address.
 

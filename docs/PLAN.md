@@ -9,10 +9,23 @@ tailnet origin.
 > Companion docs:
 > [`SECURITY_REVIEW_pypixelcolor.md`](./SECURITY_REVIEW_pypixelcolor.md) — the upstream
 > library audit that this plan's security controls are built around.
+>
+> **This is PLAN v2**, revised after a three-persona adversarial review — see
+> [`PLAN_REVIEW.md`](./PLAN_REVIEW.md). The changelog at the bottom lists what changed
+> and why (incl. two factual corrections to v1). Where this doc and the review differ,
+> the review's reasoning is authoritative.
 
 ---
 
 ## 0. TL;DR / decisions
+
+> **v2 load-bearing decisions** (from the review): origin is **stateless** Streamable
+> HTTP (no session/SSE) so the Worker is a plain auth proxy; **all OAuth lives on the
+> Worker** and the direct tailnet endpoint advertises **no** OAuth (else Claude Code
+> breaks — issue #59467); large image writes are **async jobs** behind a single-flight
+> BLE lock with a **notify preempt path**; the BLE link is **disposable** with a real
+> reconnect supervisor; **ops is a pre-exposure phase**. Details in §1–§7 and the review.
+
 
 - **One MCP server, three "modes" as tool namespaces** — `display.*` (tailnet
   passthrough for any service to show custom text/img), `notify.*` (Claude Code /
@@ -152,14 +165,28 @@ attention banner on the matrix.
 
 | Tool | Args | Behavior |
 |---|---|---|
-| `notify_operator` | `message` (≤120 chars), `level` (`info`/`warn`/`blocked`), `source?` (agent/session label), `ttl_seconds?` | Renders a level-colored scrolling banner (e.g. blue/amber/red + an alert glyph). Pushes onto a small in-memory **notification queue**; newest shown, queue cycles. Returns a `notification_id`. |
-| `clear_notification` | `notification_id?` (omit = clear all) | Removes from queue; restores previous display or idle screen. |
-| `list_notifications` | — | Returns active notifications (id, level, message, age). |
+| `notify_operator` | `message` (≤~40 chars to read in one scroll), `level` (`info`/`warn`/`blocked`), `source` (agent/session label — effectively required: the tailnet path is a single shared identity, so this is the only way to tell agents apart), `ttl_seconds` (**enforced** auto-expire) | Renders a level-colored banner (blue/amber/red + alert glyph), **volatile (`save_slot=0`)** to spare flash. A `blocked` notification **preempts** Mode A display and **restores** prior state on clear (state stack). Pushes onto a **persisted** queue; returns a `notification_id`. |
+| `clear_notification` | `notification_id?` (omit = clear all) | Removes from queue; pops the state stack to restore prior display or idle. Must tolerate clear-of-unknown-id (restart drops ids). |
+| `list_notifications` | — | Active notifications (id, level, message, source, age). `readOnlyHint`. |
 
-**Integration recipe (shipped in `examples/`):** a Claude Code **Notification/Stop
-hook** that calls `notify_operator` when the agent needs input, and `clear_notification`
-when it resumes. Because the board has no input device, "ack" = the operator clearing
-it (a button/web-ack endpoint is a future extension). Documented as such.
+**Integration (corrected in v2 — see review E-2):** Claude Code hooks can invoke MCP
+tools natively via the **`mcp_tool` handler type** (no shell/`curl`). Ship a
+**`Notification`** hook firing on `notification_type ∈ {permission_prompt, idle_prompt}`
+→ `notify_operator`, and a **`Stop`** hook → `clear_notification` (Stop = "turn
+finished" — correct for *clearing*, wrong as the "needs input" trigger). The richer,
+spec-correct path for "server needs user input" is the **`Elicitation` /
+`ElicitationResult`** events + MCP elicitation. Because the board has no input device
+there is **no closed-loop ack** — position the matrix as an **ambient/secondary** alert
+and pair `blocked` with a real push channel. `ttl_seconds` is enforced so a missed
+`Stop` hook can't strand the board on red.
+
+```json
+// .claude/settings.json — Notification hook (mcp_tool handler)
+{ "hooks": { "Notification": [ { "hooks": [ {
+  "type": "mcp_tool", "server": "ipixel", "tool": "notify_operator",
+  "input": { "message": "operator input needed", "level": "blocked", "source": "claude-code" }
+} ] } ] } }
+```
 
 ### Mode C — `gallery.*` — prebuilt images / ASCII art / texts
 A curated, **server-controlled** asset set (no caller-supplied bytes → smallest attack
@@ -209,22 +236,35 @@ merged; pin to a known-good Pillow.
 - `defaultHandler` authenticates the **single operator**. Recommended (simplest robust):
   **GitHub OAuth allow-listed to your GitHub login**. Alternative: a one-password login
   page (secret in Worker env). Either way Claude clients see standard OAuth.
-- Allow-list Claude's callback `https://claude.ai/api/mcp/auth_callback` (+ `.com`).
-- Worker validates the bearer on every `/mcp` request, then proxies to the origin over
-  the Tunnel (adding the Access service-token headers).
+- DCR registers redirect URIs **per client** — do **not** hard-allowlist only
+  `https://claude.ai/api/mcp/auth_callback`; Desktop and Claude Code use **different**
+  redirects (Code uses a localhost loopback). Let DCR handle exact-match registration.
+- **Audience invariant (review C-4):** the claude.ai token's `resource`/audience is the
+  **Worker** URL. The Worker terminates that token and proxies; it **never forwards the
+  user OAuth token** to the origin (forbidden token-passthrough / confused-deputy). The
+  origin authenticates **the Worker** via the **Cloudflare Access service-token JWT**
+  only, and reads a trusted `X-Mcp-Scopes` header (honored *only* on this path) for
+  scope gating.
 
 **Direct tailnet path (Claude Code / Desktop-via-`mcp-remote` on the tailnet):**
-- Origin accepts a **static bearer** (`Authorization: Bearer <token>` from env) — the
-  brief's "simplest auth possible." Tailnet ACLs are the real boundary; the token stops
-  casual tailnet peers. Add with:
+- This endpoint advertises **NO OAuth** — **no** `/.well-known/oauth-protected-resource`,
+  **no** `401 + WWW-Authenticate`. It plainly `200`s with a valid **static bearer**
+  (`Authorization: Bearer <token>` from env) and `401`s without. **This reversal vs v1
+  is mandatory:** if the origin advertised OAuth *and* a static header were set, Claude
+  Code ignores the header and falls into OAuth discovery (issue #59467), hiding all our
+  tools. Tailnet ACLs are the real boundary; the token stops casual tailnet peers.
   `claude mcp add --transport http ipixel https://board.<tailnet>.ts.net/mcp --header "Authorization: Bearer $TOKEN"`.
+
+**Origin authorization function (single, explicit precedence — review C-4):**
+1. valid **CF Access service-token JWT** (verified by the origin itself, not trusted by
+   loopback) → trust Worker; read `X-Mcp-Scopes` for `clear`/`delete` gating;
+2. else `Authorization: Bearer == STATIC_TOKEN` → fixed non-admin scope set;
+3. else plain `401` (no OAuth advertisement).
 
 **Authless mode (first light only):** Worker template `remote-mcp-authless` + origin
 with auth disabled, behind an unguessable hostname + Cloudflare Access. Not the end
-state; documented as test-only.
-
-> The origin implements RFC 9728 PRM + `401` challenge so that the *direct* tailnet
-> path can also do real OAuth later if desired; for now static bearer keeps it simple.
+state; documented as test-only. (No speculative origin-side RFC 9728 scaffolding —
+removed in v2.)
 
 ---
 
@@ -232,9 +272,10 @@ state; documented as test-only.
 
 **Origin (Python 3.12):** `mcp` (official SDK, FastMCP, Streamable HTTP) ·
 `pydantic` · hardened `pypixelcolor` (pinned) · `Pillow` (pinned, `MAX_IMAGE_PIXELS`) ·
-`uvicorn`/`starlette`. **Edge (TypeScript):** Cloudflare `agents` +
-`@cloudflare/workers-oauth-provider` + `wrangler`. **Infra:** `cloudflared`,
-`tailscale`, `systemd` units.
+`uvicorn`/`starlette`. **Edge (TypeScript):** `@cloudflare/workers-oauth-provider` +
+`wrangler` — a **hand-written `fetch` auth proxy** via `apiHandlers` (**not** the
+`agents`/`McpAgent` Durable-Object host: the MCP server is Python on the device, not
+in-Worker). **Infra:** `cloudflared`, `tailscale`, `systemd` units.
 
 ```
 ipixel-mcp/
@@ -244,11 +285,14 @@ ipixel-mcp/
 ├── server/                         # Python origin MCP server
 │   ├── ipixel_mcp/
 │   │   ├── __main__.py             # FastMCP app, Streamable HTTP, auth middleware
-│   │   ├── device.py               # single persistent BLE session + asyncio lock
+│   │   ├── device.py               # BLE session + lock + reconnect supervisor + MTU + timeouts
+│   │   ├── jobs.py                  # async media-transfer jobs (job_id + status)
+│   │   ├── display_state.py        # ownership/TTL + preempt/restore state stack
+│   │   ├── auth.py                  # CF-Access-JWT vs static-bearer precedence (§5)
 │   │   ├── safety.py               # image/text limits, schema helpers (F-2/3/6)
 │   │   ├── modes/display.py        # Mode A tools
-│   │   ├── modes/notify.py         # Mode B tools + notification queue
-│   │   └── modes/gallery.py        # Mode C tools (reads assets/manifest.json)
+│   │   ├── modes/notify.py         # Mode B tools + persisted notification queue
+│   │   └── modes/gallery.py        # Mode C tools + MCP resources (assets/manifest.json)
 │   ├── assets/                     # prebuilt images / ascii / texts + manifest.json
 │   ├── pyproject.toml + lockfile   # pinned deps, hashes
 │   └── tests/                      # schema, limits, mode logic (mock BLE)
@@ -269,24 +313,33 @@ ipixel-mcp/
 
 ---
 
-## 7. Delivery phases
+## 7. Delivery phases (v2 — reordered per review)
 
-- **Phase 0 — Origin MVP (local/tailnet, authless):** FastMCP Streamable HTTP server;
-  `device.py` persistent BLE session + lock; `display_text` / `display_image`
-  (bytes-only, limits) / `get_device_info`. Bound to loopback. Test with Claude Code
-  over tailnet. *Exit:* board shows text/img from Claude Code.
-- **Phase 1 — Safety hardening:** all `safety.py` limits (F-2/3/6/11), pinned deps +
-  `pip-audit`, generic errors (F-9), static-bearer auth on origin, gate
-  `clear`/`delete`. Unit tests with mocked BLE. *Exit:* security controls table ✔.
-- **Phase 2 — Modes B & C:** notification queue + `notify.*`; `gallery.*` + assets +
-  manifest; Claude Code notify-hook example. *Exit:* operator-alert + presets working.
-- **Phase 3 — Public exposure:** `cloudflared` tunnel + Access service token; Worker
-  with `workers-oauth-provider` (authless first, then single-operator GitHub OAuth +
-  DCR); connect from **Claude.ai web** and **Claude Desktop**. *Exit:* all three
-  clients connected; OAuth flow green.
-- **Phase 4 — Ops & polish:** systemd units, Tailscale ACL doc, rate limiting,
-  structured logging/metrics, runbook, README quickstarts per client, optional web-ack
-  endpoint for Mode B.
+- **Phase 0 — Origin MVP + BLE robustness:** **stateless** Streamable HTTP server;
+  `display_text` / `get_device_info`; `device.py` single-flight lock **plus a reconnect
+  supervisor, per-op `asyncio.wait_for` timeouts, dynamic MTU, and `/healthz`**. Resolve
+  bind-order (always bind loopback; tailnet bind lazily) and single-vs-multi-board.
+  *Exit:* **survives a BLE disconnect and recovers** (not merely "shows text").
+- **Phase 1 — Safety hardening:** all `safety.py` limits (F-2/3/6/11); **flash-wear
+  defaults (volatile `save_slot=0`)**; **model-specific enum gating** (animations 3/4
+  bootloop non-32×32 boards); pinned transitive tree + hashes + `pip-audit`; generic
+  errors (F-9); the origin **auth function** (§5 precedence); gate `clear`/`delete` by
+  admin scope + tool `annotations`. *Exit:* security controls table ✔.
+- **Phase 2 — Async media + modes B & C:** `display_image`/animation as **async jobs**
+  (`job_id` + status, encoded-size/frame/time caps); `notify.*` with **preempt path +
+  persisted queue + enforced TTL**; **display ownership/state stack**; `gallery.*` as
+  MCP **resources** + `show_preset` + guarded `image_url`; Claude Code **`mcp_tool`
+  `Notification` hook** example. *Exit:* operator-alert + presets working under contention.
+- **Phase 3 — Ops & provisioning (pre-exposure):** systemd ordering/`Restart=`, secrets
+  locations + rotation, SD-card/power-loss posture, tunnel/Access/tailnet-key renewal,
+  remote log shipping. *Promoted ahead of exposure — it's the real long pole.*
+- **Phase 4 — Public exposure:** `cloudflared` + Access service token; Worker
+  (`workers-oauth-provider`, **plain auth proxy**, single-operator login, per-client
+  DCR); connect from **Claude.ai web** + **Desktop**; verify the **audience invariant**
+  end-to-end. *Exit:* all three clients connected; OAuth green.
+- **Phase 5 — Polish:** rate limits, metrics, runbooks, per-client docs,
+  burn-in/longevity defaults (modest brightness, idle dim/rotate, off-hours), optional
+  web-ack for Mode B.
 
 ---
 
@@ -306,5 +359,39 @@ ipixel-mcp/
 
 ---
 
-*Next step after sign-off: scaffold `server/` (Phase 0) and `worker/` and wire the
-first end-to-end `display_text` from Claude Code over the tailnet.*
+## 9. v2 changelog (from the adversarial review)
+
+Full reasoning in [`PLAN_REVIEW.md`](./PLAN_REVIEW.md). Key changes vs v1:
+
+- **[FACTUAL FIX]** Direct tailnet endpoint advertises **no OAuth**; static bearer only
+  (Claude Code issue #59467). All OAuth moved to the Worker. §5 rewritten.
+- **[FACTUAL FIX]** Claude Code hooks call MCP tools natively (`mcp_tool` handler) —
+  Mode B integration rewritten; added `Elicitation` path. §3 Mode B.
+- **[DECISION]** Origin is **stateless** Streamable HTTP (no session/SSE); Worker is a
+  **plain auth proxy**, **not** an `agents`/`McpAgent` host. §0, §6.
+- **[DECISION]** Large image/animation writes are **async jobs** + caps; `notify.*` gets
+  a **preempt path** (single BLE lock ⇒ head-of-line blocking). §3, §7.
+- **[DECISION]** BLE link is **disposable**: reconnect supervisor + per-op timeouts +
+  dynamic MTU + `/healthz`; on window failure → disconnect/reconnect to clear device
+  state. §7 Phase 0.
+- **[DECISION]** Single origin **auth function** with CF-Access-JWT vs static-bearer
+  precedence; **audience invariant** (Worker is the RS for claude.ai; no token
+  passthrough). §5.
+- **[DECISION]** **Ops promoted to a pre-exposure phase** (bind-order, systemd ordering,
+  SD/power, secrets/rotation, renewal, remote logs). §7 Phase 3.
+- **[HARDWARE]** Flash-wear defaults (volatile by default), model-specific enum gating
+  (animation bootloop), longevity defaults (brightness/burn-in). §3, §7.
+- **[MCP]** Flat snake_case tool names + `annotations` (drop confirm-token arg); gallery
+  as **resources**; `image_url` + `show_preset` as the model's image path (not
+  base64); display **ownership/state** layer; concrete schemas. §3.
+- Tailscale **Funnel** demoted from "fallback" to a weaker, different threat model.
+
+New open question for the operator (adds to §8): **single vs multiple boards** must be
+decided **before Phase 0** (it changes the session model), and **stateless vs stateful**
+is now decided (stateless).
+
+---
+
+*Next step after sign-off: scaffold `server/` (Phase 0) — stateless FastMCP +
+`device.py` reconnect supervisor — and wire the first end-to-end `display_text` from
+Claude Code over the tailnet, proving disconnect recovery.*
